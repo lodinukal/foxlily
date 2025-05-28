@@ -97,6 +97,9 @@ pub const impl = struct {
 };
 
 pub fn init(desc: gpu.InitDesc) Error!void {
+    if (impl.api) |_| {
+        return error.AlreadyInitialized;
+    }
     if (comptime config.gpu_d3d12) {
         if (desc.api == .d3d12) {
             try impl.d3d12.init(desc);
@@ -107,7 +110,9 @@ pub fn init(desc: gpu.InitDesc) Error!void {
     if (comptime config.gpu_vulkan) {
         if (desc.api == .vulkan) {}
     }
-    if (comptime config.gpu_metal) {}
+    if (comptime config.gpu_metal) {
+        if (desc.api == .metal) {}
+    }
     return error.NoApi;
 }
 
@@ -120,271 +125,6 @@ pub fn deinit() void {
         .vulkan => {},
         .metal => {},
     }
-}
-
-/// utility to deinit any type
-pub inline fn deinitAny(handle: anytype) void {
-    switch (@TypeOf(handle)) {
-        CommandQueue => deinitCommandQueue(handle),
-        CommandBuffer => deinitCommandBuffer(handle),
-        Fence => deinitFence(handle),
-        Buffer => deinitBuffer(handle),
-        Texture => deinitTexture(handle),
-        Pipeline => deinitPipeline(handle),
-        PipelineLayout => deinitPipelineLayout(handle),
-        Swapchain => deinitSwapchain(handle),
-        Resource => deinitResource(handle),
-        ResourceSet => deinitResourceSet(handle),
-        else => {},
-    }
-}
-
-/// utility to deinit a structure of resources
-pub fn deinitStruct(structure: anytype) void {
-    const T = @TypeOf(structure);
-    const type_info = @typeInfo(T);
-    switch (type_info) {
-        .pointer => switch (type_info.pointer.size) {
-            .one => deinitStruct(structure.*),
-            .slice => inline for (structure) |v| {
-                deinitStruct(v);
-            },
-            else => {},
-        },
-        .array => inline for (structure) |v| {
-            deinitStruct(v);
-        },
-        .@"struct" => inline for (type_info.@"struct".fields) |field| {
-            deinitAny(@field(structure, field.name));
-        },
-        else => {},
-    }
-}
-
-pub inline fn initTextureResource(desc: TextureResourceDesc) Error!Resource {
-    return impl.call(.initTextureResource, Error!Resource, .{desc});
-}
-pub inline fn initBufferResource(desc: BufferResourceDesc) Error!Resource {
-    return impl.call(.initBufferResource, Error!Resource, .{desc});
-}
-pub inline fn initSampler(desc: SamplerDesc) Error!Resource {
-    return impl.call(.initSampler, Error!Resource, .{desc});
-}
-pub inline fn deinitResource(resource: Resource) void {
-    impl.call(.deinitResource, void, .{resource});
-}
-
-pub inline fn initResourceSet(pipeline_layout: PipelineLayout) Error!ResourceSet {
-    return impl.call(.initResourceSet, Error!ResourceSet, .{pipeline_layout});
-}
-pub inline fn deinitResourceSet(set: ResourceSet) void {
-    impl.call(.deinitResourceSet, void, .{set});
-}
-pub inline fn setResource(set: ResourceSet, binding: u32, offset: u32, resource: Resource) Error!void {
-    return impl.call(.setResource, Error!void, .{ set, binding, offset, resource });
-}
-
-pub inline fn initCommandQueue(desc: CommandQueueDesc) Error!CommandQueue {
-    return impl.call(.initCommandQueue, Error!CommandQueue, .{desc});
-}
-pub inline fn deinitCommandQueue(queue: CommandQueue) void {
-    impl.call(.deinitCommandQueue, void, .{queue});
-}
-pub inline fn signalFence(queue: CommandQueue, fence: Fence, value: u64) Error!void {
-    return impl.call(.signalFence, Error!void, .{ queue, fence, value });
-}
-pub inline fn waitFence(queue: CommandQueue, fence: Fence, value: u64) Error!void {
-    return impl.call(.waitFence, Error!void, .{ queue, fence, value });
-}
-pub inline fn submitQueue(queue: CommandQueue, cmd: CommandBuffer) Error!void {
-    return impl.call(.submitQueue, Error!void, .{ queue, cmd });
-}
-
-pub inline fn initCommandBuffer(queue: CommandQueue) Error!CommandBuffer {
-    return impl.call(.initCommandBuffer, Error!CommandBuffer, .{queue});
-}
-pub inline fn deinitCommandBuffer(cmd: CommandBuffer) void {
-    return impl.call(.deinitCommandBuffer, void, .{cmd});
-}
-pub inline fn beginCommandBuffer(cmd: CommandBuffer) Error!void {
-    return impl.call(.beginCommandBuffer, Error!void, .{cmd});
-}
-pub inline fn endCommandBuffer(cmd: CommandBuffer) Error!void {
-    return impl.call(.endCommandBuffer, Error!void, .{cmd});
-}
-pub inline fn setViewports(cmd: CommandBuffer, viewports: []const Viewport) void {
-    return impl.call(.setViewports, void, .{ cmd, viewports });
-}
-pub inline fn setScissors(cmd: CommandBuffer, scissors: []const Rect) void {
-    return impl.call(.setScissors, void, .{ cmd, scissors });
-}
-pub inline fn setDepthBounds(cmd: CommandBuffer, min: f32, max: f32) void {
-    return impl.call(.setDepthBounds, void, .{ cmd, min, max });
-}
-pub inline fn setStencilReference(cmd: CommandBuffer, ref: u8) void {
-    return impl.call(.setStencilReference, void, .{ cmd, ref });
-}
-pub inline fn clearAttachment(cmd: CommandBuffer, clear: Clear, rect: Rect) void {
-    return impl.call(.clearAttachment, void, .{ cmd, clear, rect });
-}
-pub inline fn clearBuffer(cmd: CommandBuffer, desc: ClearBufferDesc) void {
-    return impl.call(.clearBuffer, void, .{ cmd, desc });
-}
-pub inline fn clearTexture(cmd: CommandBuffer, desc: ClearTextureDesc) void {
-    return impl.call(.clearTexture, void, .{ cmd, desc });
-}
-pub inline fn setVertexBuffer(cmd: CommandBuffer, slot: u32, buffer: Buffer, offset: u64) void {
-    return impl.call(.setVertexBuffer, void, .{ cmd, slot, buffer, offset });
-}
-pub inline fn setIndexBuffer(cmd: CommandBuffer, buffer: Buffer, offset: u64, kind: IndexKind) void {
-    return impl.call(.setIndexBuffer, void, .{ cmd, buffer, offset, kind });
-}
-pub inline fn setPipelineLayout(cmd: CommandBuffer, layout: PipelineLayout) void {
-    return impl.call(.setPipelineLayout, void, .{ cmd, layout });
-}
-pub inline fn setPipeline(cmd: CommandBuffer, pipeline: Pipeline) void {
-    return impl.call(.setPipeline, void, .{ cmd, pipeline });
-}
-pub inline fn setResourceSet(cmd: CommandBuffer, set: ResourceSet) void {
-    return impl.call(.setResourceSet, void, .{ cmd, set });
-}
-pub inline fn setConstant(cmd: CommandBuffer, data: []const u8) void {
-    return impl.call(.setConstant, void, .{ cmd, data });
-}
-pub inline fn draw(cmd: CommandBuffer, desc: Draw) void {
-    return impl.call(.draw, void, .{ cmd, desc });
-}
-pub inline fn drawIndexed(cmd: CommandBuffer, desc: DrawIndexed) void {
-    return impl.call(.drawIndexed, void, .{ cmd, desc });
-}
-pub inline fn drawIndirect(cmd: CommandBuffer, desc: DrawIndirect) void {
-    return impl.call(.drawIndirect, void, .{ cmd, desc });
-}
-pub inline fn drawIndexedIndirect(cmd: CommandBuffer, desc: DrawIndirect) void {
-    return impl.call(.drawIndexedIndirect, void, .{ cmd, desc });
-}
-pub inline fn dispatch(cmd: CommandBuffer, desc: Dispatch) void {
-    return impl.call(.dispatch, void, .{ cmd, desc });
-}
-pub inline fn dispatchIndirect(cmd: CommandBuffer, desc: DispatchIndirect) void {
-    return impl.call(.dispatchIndirect, void, .{ cmd, desc });
-}
-pub inline fn copyBufferToBuffer(
-    cmd: CommandBuffer,
-    dst: Buffer,
-    dst_offset: u64,
-    src: Buffer,
-    src_offset: u64,
-    size: u64,
-) void {
-    return impl.call(.copyBufferToBuffer, void, .{ cmd, dst, dst_offset, src, src_offset, size });
-}
-pub inline fn copyTextureToTexture(
-    cmd: CommandBuffer,
-    dst: Texture,
-    dst_region_opt: ?TextureRegion,
-    src: Texture,
-    src_region_opt: ?TextureRegion,
-) void {
-    return impl.call(.copyTextureToTexture, void, .{ cmd, dst, dst_region_opt, src, src_region_opt });
-}
-pub inline fn copyBufferToTexture(
-    cmd: CommandBuffer,
-    dst: Texture,
-    dst_region_opt: ?TextureRegion,
-    src: Buffer,
-    src_data_layout: TextureDataLayout,
-) void {
-    return impl.call(.copyBufferToTexture, void, .{ cmd, dst, dst_region_opt, src, src_data_layout });
-}
-pub inline fn copyTextureToBuffer(
-    cmd: CommandBuffer,
-    dst: Buffer,
-    dst_data_layout: TextureDataLayout,
-    src: Texture,
-    src_region_opt: ?TextureRegion,
-) void {
-    return impl.call(.copyTextureToBuffer, void, .{ cmd, dst, dst_data_layout, src, src_region_opt });
-}
-pub inline fn beginRendering(cmd: CommandBuffer, attachments: Attachments) void {
-    return impl.call(.beginRendering, void, .{ cmd, attachments });
-}
-pub inline fn endRendering(cmd: CommandBuffer) void {
-    return impl.call(.endRendering, void, .{cmd});
-}
-pub inline fn ensureTextureState(cmd: CommandBuffer, texture: Texture, state: TextureState) void {
-    return impl.call(.ensureTextureState, void, .{ cmd, texture, state });
-}
-pub inline fn ensureBufferState(cmd: CommandBuffer, b: Buffer, state: BufferState) void {
-    return impl.call(.ensureBufferState, void, .{ cmd, b, state });
-}
-
-pub inline fn initFence() Error!Fence {
-    return impl.call(.initFence, Error!Fence, .{});
-}
-pub inline fn deinitFence(fence: Fence) void {
-    return impl.call(.deinitFence, void, .{fence});
-}
-pub inline fn waitFenceBlocking(fence: Fence, value: u64) Error!void {
-    return impl.call(.waitFenceBlocking, Error!void, .{ fence, value });
-}
-
-pub inline fn initBuffer(desc: BufferDesc) Error!Buffer {
-    return impl.call(.initBuffer, Error!Buffer, .{desc});
-}
-pub inline fn deinitBuffer(buffer: Buffer) void {
-    return impl.call(.deinitBuffer, void, .{buffer});
-}
-pub inline fn map(buffer: Buffer, offset: u64, size: ?u64) ![]u8 {
-    return impl.call(.mapBuffer, Error![]u8, .{ buffer, offset, size orelse WHOLE_SIZE });
-}
-pub inline fn unmap(buffer: Buffer) void {
-    impl.call(.unmapBuffer, void, .{buffer});
-}
-
-pub inline fn initTexture(desc: TextureDesc) Error!Texture {
-    return impl.call(.initTexture, Error!Texture, .{desc});
-}
-pub inline fn deinitTexture(texture: Texture) void {
-    impl.call(.deinitTexture, void, .{texture});
-}
-
-pub inline fn initPipelineLayout(desc: PipelineLayoutDesc) Error!PipelineLayout {
-    return impl.call(.initPipelineLayout, Error!PipelineLayout, .{desc});
-}
-pub inline fn deinitPipelineLayout(layout: PipelineLayout) void {
-    impl.call(.deinitPipelineLayout, void, .{layout});
-}
-
-pub inline fn initGraphicsPipeline(
-    desc: GraphicsPipelineDesc,
-) Error!Pipeline {
-    return impl.call(.initGraphicsPipeline, Error!Pipeline, .{desc});
-}
-pub inline fn deinitPipeline(pipeline: Pipeline) void {
-    impl.call(.deinitPipeline, void, .{pipeline});
-}
-
-pub inline fn initSwapchain(desc: SwapchainDesc) Error!Swapchain {
-    return impl.call(.initSwapchain, Error!Swapchain, .{desc});
-}
-pub inline fn deinitSwapchain(swapchain: Swapchain) void {
-    impl.call(.deinitSwapchain, void, .{swapchain});
-}
-pub inline fn resizeSwapchain(swapchain: Swapchain, size: Vec2u) Error!void {
-    return impl.call(.resizeSwapchain, Error!void, .{ swapchain, size });
-}
-pub inline fn acquireNextSwapchainTexture(swapchain: Swapchain) !u32 {
-    return impl.call(.acquireNextSwapchainTexture, Error!u32, .{swapchain});
-}
-/// NOTE: do not store the result as it will be invalidated after the next resize
-///
-/// memory is owned by the swapchain
-pub inline fn getSwapchainTextures(swapchain: Swapchain) Error![]const Texture {
-    return impl.call(.getSwapchainTextures, Error![]const Texture, .{swapchain});
-}
-pub inline fn presentSwapchain(swapchain: Swapchain) Error!void {
-    return impl.call(.presentSwapchain, Error!void, .{swapchain});
 }
 
 /// maximum number of swapchain images
@@ -406,56 +146,270 @@ pub const MAX_VERTEX_BUFFERS = 8;
 /// maximum number of vertex attributes in an input layout
 pub const MAX_VERTEX_ATTRIBUTES = 16;
 
-pub const CommandQueue = enum(u32) {
-    /// queue that is always created which the swapchain is presented on
-    primary = 0,
+pub const CommandQueue = opaque {
+    pub inline fn primary() *CommandQueue {
+        return impl.call(.primaryQueue, *CommandQueue, .{});
+    }
 
-    null = std.math.maxInt(u32),
-    _,
+    pub inline fn init(allocator: std.mem.Allocator, desc: CommandQueueDesc) Error!*CommandQueue {
+        return impl.call(.initCommandQueue, Error!*CommandQueue, .{ allocator, desc });
+    }
+    pub inline fn deinit(queue: *CommandQueue) void {
+        impl.call(.deinitCommandQueue, void, .{queue});
+    }
+
+    pub inline fn signalFence(queue: *CommandQueue, fence: *Fence, value: u64) Error!void {
+        return impl.call(.signalFence, Error!void, .{ queue, fence, value });
+    }
+
+    pub inline fn waitFence(queue: *CommandQueue, fence: *Fence, value: u64) Error!void {
+        return impl.call(.waitFence, Error!void, .{ queue, fence, value });
+    }
+
+    pub inline fn submit(queue: *CommandQueue, cmd: *CommandBuffer) Error!void {
+        return impl.call(.submitQueue, Error!void, .{ queue, cmd });
+    }
 };
-pub const CommandBuffer = enum(u32) {
-    null = std.math.maxInt(u32),
-    _,
+pub const CommandBuffer = opaque {
+    pub inline fn init(allocator: std.mem.Allocator, queue: *CommandQueue) Error!*CommandBuffer {
+        return impl.call(.initCommandBuffer, Error!*CommandBuffer, .{ allocator, queue });
+    }
+    pub inline fn deinit(cmd: *CommandBuffer) void {
+        return impl.call(.deinitCommandBuffer, void, .{cmd});
+    }
+
+    pub inline fn begin(cmd: *CommandBuffer) Error!void {
+        return impl.call(.beginCommandBuffer, Error!void, .{cmd});
+    }
+    pub inline fn end(cmd: *CommandBuffer) Error!void {
+        return impl.call(.endCommandBuffer, Error!void, .{cmd});
+    }
+    pub inline fn setViewports(cmd: *CommandBuffer, viewports: []const Viewport) void {
+        return impl.call(.setViewports, void, .{ cmd, viewports });
+    }
+    pub inline fn setScissors(cmd: *CommandBuffer, scissors: []const Rect) void {
+        return impl.call(.setScissors, void, .{ cmd, scissors });
+    }
+    pub inline fn setDepthBounds(cmd: *CommandBuffer, min: f32, max: f32) void {
+        return impl.call(.setDepthBounds, void, .{ cmd, min, max });
+    }
+    pub inline fn setStencilReference(cmd: *CommandBuffer, ref: u8) void {
+        return impl.call(.setStencilReference, void, .{ cmd, ref });
+    }
+    pub inline fn clearAttachment(cmd: *CommandBuffer, clear: Clear, rect: Rect) void {
+        return impl.call(.clearAttachment, void, .{ cmd, clear, rect });
+    }
+    pub inline fn clearBuffer(cmd: *CommandBuffer, desc: ClearBufferDesc) void {
+        return impl.call(.clearBuffer, void, .{ cmd, desc });
+    }
+    pub inline fn clearTexture(cmd: *CommandBuffer, desc: ClearTextureDesc) void {
+        return impl.call(.clearTexture, void, .{ cmd, desc });
+    }
+    pub inline fn setVertexBuffer(cmd: *CommandBuffer, slot: u32, buffer: *Buffer, offset: u64) void {
+        return impl.call(.setVertexBuffer, void, .{ cmd, slot, buffer, offset });
+    }
+    pub inline fn setIndexBuffer(cmd: *CommandBuffer, buffer: *Buffer, offset: u64, kind: IndexKind) void {
+        return impl.call(.setIndexBuffer, void, .{ cmd, buffer, offset, kind });
+    }
+    pub inline fn setPipelineLayout(cmd: *CommandBuffer, layout: *PipelineLayout) void {
+        return impl.call(.setPipelineLayout, void, .{ cmd, layout });
+    }
+    pub inline fn setPipeline(cmd: *CommandBuffer, pipeline: *Pipeline) void {
+        return impl.call(.setPipeline, void, .{ cmd, pipeline });
+    }
+    pub inline fn setResourceSet(cmd: *CommandBuffer, set: *ResourceSet) void {
+        return impl.call(.setResourceSet, void, .{ cmd, set });
+    }
+    pub inline fn setConstant(cmd: *CommandBuffer, data: []const u8) void {
+        return impl.call(.setConstant, void, .{ cmd, data });
+    }
+    pub inline fn draw(cmd: *CommandBuffer, desc: Draw) void {
+        return impl.call(.draw, void, .{ cmd, desc });
+    }
+    pub inline fn drawIndexed(cmd: *CommandBuffer, desc: DrawIndexed) void {
+        return impl.call(.drawIndexed, void, .{ cmd, desc });
+    }
+    pub inline fn drawIndirect(cmd: *CommandBuffer, desc: DrawIndirect) void {
+        return impl.call(.drawIndirect, void, .{ cmd, desc });
+    }
+    pub inline fn drawIndexedIndirect(cmd: *CommandBuffer, desc: DrawIndirect) void {
+        return impl.call(.drawIndexedIndirect, void, .{ cmd, desc });
+    }
+    pub inline fn dispatch(cmd: *CommandBuffer, desc: Dispatch) void {
+        return impl.call(.dispatch, void, .{ cmd, desc });
+    }
+    pub inline fn dispatchIndirect(cmd: *CommandBuffer, desc: DispatchIndirect) void {
+        return impl.call(.dispatchIndirect, void, .{ cmd, desc });
+    }
+    pub inline fn copyBufferToBuffer(
+        cmd: *CommandBuffer,
+        dst: *Buffer,
+        dst_offset: u64,
+        src: *Buffer,
+        src_offset: u64,
+        size: u64,
+    ) void {
+        return impl.call(.copyBufferToBuffer, void, .{ cmd, dst, dst_offset, src, src_offset, size });
+    }
+    pub inline fn copyTextureToTexture(
+        cmd: *CommandBuffer,
+        dst: *Texture,
+        dst_region_opt: ?TextureRegion,
+        src: *Texture,
+        src_region_opt: ?TextureRegion,
+    ) void {
+        return impl.call(.copyTextureToTexture, void, .{ cmd, dst, dst_region_opt, src, src_region_opt });
+    }
+    pub inline fn copyBufferToTexture(
+        cmd: *CommandBuffer,
+        dst: *Texture,
+        dst_region_opt: ?TextureRegion,
+        src: *Buffer,
+        src_data_layout: TextureDataLayout,
+    ) void {
+        return impl.call(.copyBufferToTexture, void, .{ cmd, dst, dst_region_opt, src, src_data_layout });
+    }
+    pub inline fn copyTextureToBuffer(
+        cmd: *CommandBuffer,
+        dst: *Buffer,
+        dst_data_layout: TextureDataLayout,
+        src: *Texture,
+        src_region_opt: ?TextureRegion,
+    ) void {
+        return impl.call(.copyTextureToBuffer, void, .{ cmd, dst, dst_data_layout, src, src_region_opt });
+    }
+    pub inline fn beginRendering(cmd: *CommandBuffer, attachments: Attachments) void {
+        return impl.call(.beginRendering, void, .{ cmd, attachments });
+    }
+    pub inline fn endRendering(cmd: *CommandBuffer) void {
+        return impl.call(.endRendering, void, .{cmd});
+    }
+    pub inline fn ensureTextureState(cmd: *CommandBuffer, texture: *Texture, state: TextureState) void {
+        return impl.call(.ensureTextureState, void, .{ cmd, texture, state });
+    }
+    pub inline fn ensureBufferState(cmd: *CommandBuffer, b: *Buffer, state: BufferState) void {
+        return impl.call(.ensureBufferState, void, .{ cmd, b, state });
+    }
 };
 
 // how resources are bound to the pipeline
-pub const PipelineLayout = enum(u32) {
-    null = std.math.maxInt(u32),
-    _,
-};
-pub const Pipeline = enum(u32) {
-    null = std.math.maxInt(u32),
-    _,
+pub const PipelineLayout = opaque {
+    pub inline fn init(allocator: std.mem.Allocator, desc: PipelineLayoutDesc) Error!*PipelineLayout {
+        return impl.call(.initPipelineLayout, Error!*PipelineLayout, .{ allocator, desc });
+    }
+    pub inline fn deinit(layout: *PipelineLayout) void {
+        impl.call(.deinitPipelineLayout, void, .{layout});
+    }
 };
 
-pub const Buffer = enum(u32) {
-    null = std.math.maxInt(u32),
-    _,
+pub const Pipeline = opaque {
+    pub inline fn initGraphics(
+        allocator: std.mem.Allocator,
+        desc: GraphicsPipelineDesc,
+    ) Error!*Pipeline {
+        return impl.call(.initGraphicsPipeline, Error!*Pipeline, .{ allocator, desc });
+    }
+    pub inline fn initCompute(allocator: std.mem.Allocator, desc: ComputePipelineDesc) Error!*Pipeline {
+        return impl.call(.initComputePipeline, Error!*Pipeline, .{ allocator, desc });
+    }
+    pub inline fn deinit(pipeline: *Pipeline) void {
+        impl.call(.deinitPipeline, void, .{pipeline});
+    }
 };
-pub const Texture = enum(u32) {
-    null = std.math.maxInt(u32),
-    _,
+
+pub const Buffer = opaque {
+    pub inline fn init(allocator: std.mem.Allocator, desc: BufferDesc) Error!*Buffer {
+        return impl.call(.initBuffer, Error!*Buffer, .{ allocator, desc });
+    }
+    pub inline fn deinit(buffer: *Buffer) void {
+        return impl.call(.deinitBuffer, void, .{buffer});
+    }
+
+    pub inline fn map(buffer: *Buffer, offset: u64, size: ?u64) ![]u8 {
+        return impl.call(.mapBuffer, Error![]u8, .{ buffer, offset, size orelse WHOLE_SIZE });
+    }
+    pub inline fn unmap(buffer: *Buffer) void {
+        impl.call(.unmapBuffer, void, .{buffer});
+    }
 };
-pub const Fence = enum(u32) {
-    null = std.math.maxInt(u32),
-    _,
+
+pub const Texture = opaque {
+    pub inline fn init(allocator: std.mem.Allocator, desc: TextureDesc) Error!*Texture {
+        return impl.call(.initTexture, Error!*Texture, .{ allocator, desc });
+    }
+    pub inline fn deinit(texture: *Texture) void {
+        impl.call(.deinitTexture, void, .{texture});
+    }
+};
+
+pub const Fence = opaque {
+    pub inline fn init(allocator: std.mem.Allocator) Error!*Fence {
+        return impl.call(.initFence, Error!*Fence, .{allocator});
+    }
+    pub inline fn deinit(fence: *Fence) void {
+        return impl.call(.deinitFence, void, .{fence});
+    }
+
+    /// will block the current thread until the fence is signaled
+    pub inline fn wait(fence: *Fence, value: u64) Error!void {
+        return impl.call(.waitFenceBlocking, Error!void, .{ fence, value });
+    }
 };
 
 // obtained by creating a view/sampler
-pub const Resource = enum(u32) {
-    null = std.math.maxInt(u32),
-    _,
+pub const Resource = opaque {
+    pub inline fn initTexture(allocator: std.mem.Allocator, desc: TextureResourceDesc) Error!*Resource {
+        return impl.call(.initTextureResource, Error!*Resource, .{ allocator, desc });
+    }
+    pub inline fn initBuffer(allocator: std.mem.Allocator, desc: BufferResourceDesc) Error!*Resource {
+        return impl.call(.initBufferResource, Error!*Resource, .{ allocator, desc });
+    }
+    pub inline fn initSampler(allocator: std.mem.Allocator, desc: SamplerDesc) Error!*Resource {
+        return impl.call(.initSampler, Error!*Resource, .{ allocator, desc });
+    }
+
+    pub inline fn deinit(resource: *Resource) void {
+        impl.call(.deinitResource, void, .{resource});
+    }
 };
 
 /// stores a set of resource bindings which can be bound and unbound
-pub const ResourceSet = enum(u32) {
-    null = std.math.maxInt(u32),
-    _,
+pub const ResourceSet = opaque {
+    pub inline fn init(allocator: std.mem.Allocator, pipeline_layout: *PipelineLayout) Error!*ResourceSet {
+        return impl.call(.initResourceSet, Error!*ResourceSet, .{ allocator, pipeline_layout });
+    }
+    pub inline fn deinit(set: *ResourceSet) void {
+        impl.call(.deinitResourceSet, void, .{set});
+    }
+
+    pub inline fn setResource(set: *ResourceSet, binding: u32, offset: u32, resource: *Resource) Error!void {
+        return impl.call(.setResource, Error!void, .{ set, binding, offset, resource });
+    }
 };
 
-pub const Swapchain = enum(u32) {
-    null = std.math.maxInt(u32),
-    _,
+pub const Swapchain = opaque {
+    pub inline fn init(allocator: std.mem.Allocator, desc: SwapchainDesc) Error!*Swapchain {
+        return impl.call(.initSwapchain, Error!*Swapchain, .{ allocator, desc });
+    }
+    pub inline fn deinit(swapchain: *Swapchain) void {
+        impl.call(.deinitSwapchain, void, .{swapchain});
+    }
+
+    pub inline fn resize(swapchain: *Swapchain, size: Vec2u) Error!void {
+        return impl.call(.resizeSwapchain, Error!void, .{ swapchain, size });
+    }
+    pub inline fn acquireNextTexture(swapchain: *Swapchain) !u32 {
+        return impl.call(.acquireNextSwapchainTexture, Error!u32, .{swapchain});
+    }
+    /// NOTE: do not store the result as it will be invalidated after the next resize
+    ///
+    /// memory is owned by the swapchain
+    pub inline fn getTexture(swapchain: *Swapchain, index: usize) Error!?*Texture {
+        return impl.call(.getSwapchainTexture, Error!?*Texture, .{ swapchain, index });
+    }
+    pub inline fn present(swapchain: *Swapchain) Error!void {
+        return impl.call(.presentSwapchain, Error!void, .{swapchain});
+    }
 };
 
 pub const ValidationLevel = enum(u32) {
@@ -467,8 +421,7 @@ pub const ValidationLevel = enum(u32) {
 };
 
 pub const InitDesc = struct {
-    name: []const u8 = &.{},
-    memory: []u8,
+    allocator: std.mem.Allocator,
     api: Api = .default,
     limits: ResourceLimits = .{},
     validation: ValidationLevel = switch (builtin.mode) {
@@ -477,20 +430,11 @@ pub const InitDesc = struct {
     },
 };
 
-/// default resource limits for a small project
+/// gpu level limits (increase this if need more resources)
 pub const ResourceLimits = struct {
-    max_command_buffers: u32 = gpu.MAX_SWAPCHAIN_IMAGES * 2,
-    max_command_queues: u32 = 3,
-    max_pipeline_layouts: u32 = 8,
-    max_pipelines: u32 = 32,
-    max_buffers: u32 = 32,
-    max_textures: u32 = 512,
-    max_fences: u32 = 16,
-    max_samplers: u32 = 16,
-    max_resource_sets: u32 = 16,
-    max_render_targets: u32 = 8,
-    max_depth_stencils: u32 = 8,
-    max_swapchains: u32 = 1,
+    max_buffers: u32 = 4096,
+    max_textures: u32 = 4096,
+    max_samplers: u32 = 4096,
 };
 
 pub const Api = enum(u32) {
@@ -832,7 +776,7 @@ pub const BufferState = enum(u32) {
 pub const TextureResourceDesc = struct {
     name: []const u8,
 
-    texture: Texture,
+    texture: *Texture,
     dimension: TextureDimension,
     kind: ViewKind,
     format: Format,
@@ -848,14 +792,14 @@ pub const TextureResourceDesc = struct {
 pub const BufferResourceDesc = struct {
     name: []const u8,
 
-    buffer: Buffer,
+    buffer: *Buffer,
     kind: ViewKind,
     format: Format,
     size: u64 = WHOLE_SIZE,
     offset: u64 = 0,
 };
 
-/// the binding model of foxlily's gpu abstraction is similar to metal's.
+/// the binding model of ila's gpu abstraction is similar to metal's.
 /// a shader can have multiple bindings identified by a binding index
 ///
 /// for example:
@@ -1010,7 +954,7 @@ pub const VertexAttribute = struct {
     /// which stream the attribute is in
     stream: u32 = 0,
 
-    pub fn init(location: u32, offset: u32, kind: Kind, stream: u32) VertexAttribute {
+    pub fn attr(location: u32, offset: u32, kind: Kind, stream: u32) VertexAttribute {
         return .{
             .location = location,
             .offset = offset,
@@ -1048,7 +992,7 @@ pub const VertexStream = struct {
     /// the rate at which the stream advances
     step_rate: VertexStreamStepRate,
 
-    pub fn init(stride: u32, step_rate: VertexStreamStepRate) VertexStream {
+    pub fn stream(stride: u32, step_rate: VertexStreamStepRate) VertexStream {
         return .{
             .stride = stride,
             .step_rate = step_rate,
@@ -1098,8 +1042,6 @@ pub const DepthBias = struct {
 
 /// describes how to rasterize primitives
 pub const Rasterization = struct {
-    /// number of viewports
-    viewport_num: u32 = 1,
     depth_bias: DepthBias = .{},
     fill_mode: FillMode = .solid,
     cull_mode: CullMode = .none,
@@ -1115,7 +1057,6 @@ pub const Multisample = struct {
     sample_mask: u32 = 0,
     sample_num: u32 = 0,
     alpha_to_coverage: bool = false,
-    sample_locations: bool = false,
 };
 
 /// S - source color 0
@@ -1340,7 +1281,7 @@ pub const StencilAttachment = struct {
 
 /// describes how to merge to create the final pixel color
 pub const OutputMerger = struct {
-    colors: []const ColorAttachment = &.{},
+    attachments: []const ColorAttachment = &.{},
     depth: DepthAttachment = .{},
     stencil: StencilAttachment = .{},
     depth_stencil_format: Format = .unknown,
@@ -1348,8 +1289,8 @@ pub const OutputMerger = struct {
 };
 
 pub const Attachments = struct {
-    depth_stencil: Resource = .null,
-    colors: []const Resource = &.{},
+    depth_stencil: ?*Resource = null,
+    attachments: []const *Resource = &.{},
 };
 
 pub const Filter = enum(u32) {
@@ -1407,52 +1348,179 @@ pub const ShaderTarget = enum(u32) {
 pub const ShaderDesc = struct {
     enabled: bool = false,
     stage: ShaderStage = .vertex,
+    target: ShaderTarget = .dxil,
     bytecode: []const u8 = &.{},
 
-    pub fn vertex(bytecode: []const u8) ShaderDesc {
+    pub fn vertex(target: ShaderTarget, bytecode: []const u8) ShaderDesc {
         return .{
             .enabled = true,
             .stage = .vertex,
+            .target = target,
             .bytecode = bytecode,
         };
     }
 
-    pub fn fragment(bytecode: []const u8) ShaderDesc {
+    pub fn fragment(target: ShaderTarget, bytecode: []const u8) ShaderDesc {
         return .{
             .enabled = true,
             .stage = .fragment,
+            .target = target,
             .bytecode = bytecode,
         };
     }
 
-    pub fn compute(bytecode: []const u8) ShaderDesc {
+    pub fn compute(target: ShaderTarget, bytecode: []const u8) ShaderDesc {
         return .{
             .enabled = true,
             .stage = .compute,
+            .target = target,
             .bytecode = bytecode,
         };
     }
 };
 
+pub const ShaderContainer = struct {
+    count: u32 = 0,
+    shaders: [ShaderStage.len * ShaderTarget.len]ShaderDesc = undefined,
+
+    pub const Iterator = struct {
+        index: u32 = 0,
+        container: *const ShaderContainer,
+
+        pub const Filter = struct {
+            stage: ?ShaderStage = null,
+            target: ?ShaderTarget = null,
+        };
+
+        pub fn next(self: *Iterator, filter: @This().Filter) ?ShaderDesc {
+            while (self.index < self.container.count) {
+                const shader = self.container.shaders[self.index];
+                self.index += 1;
+
+                if (filter.stage) |stage| if (shader.stage != stage) continue;
+                if (filter.target) |target| if (shader.target != target) continue;
+
+                return shader;
+            }
+            return null;
+        }
+    };
+
+    pub fn iterator(self: *const ShaderContainer) Iterator {
+        return .{ .container = self };
+    }
+
+    pub fn add(self: *ShaderContainer, shader: ShaderDesc) void {
+        self.shaders[self.count] = shader;
+        self.count += 1;
+    }
+};
+
 pub const GraphicsPipelineDesc = struct {
-    layout: PipelineLayout,
+    layout: *PipelineLayout,
     vertex_input: VertexInput = .{},
     input_assembly: InputAssembly = .{},
     rasterization: Rasterization = .{},
     multisample: Multisample = .{},
     output_merger: OutputMerger = .{},
-    shader_num: u32 = 0,
-    shaders: [ShaderStage.len]ShaderDesc = undefined,
+    // allow multiple shaders to be added
+    shaders: ShaderContainer = .{},
+
+    pub fn init(layout: *PipelineLayout) GraphicsPipelineDesc {
+        return .{ .layout = layout };
+    }
+
+    // vertex input
+    pub fn vertexAttributes(self: *GraphicsPipelineDesc, attributes: []const VertexAttribute) void {
+        self.vertex_input.attributes = attributes;
+    }
+    pub fn vertexStreams(self: *GraphicsPipelineDesc, streams: []const VertexStream) void {
+        self.vertex_input.streams = streams;
+    }
+
+    // input assembly
+    pub fn inputTopology(self: *GraphicsPipelineDesc, topology: Topology) void {
+        self.input_assembly.topology = topology;
+    }
+
+    pub fn depthBias(self: *GraphicsPipelineDesc, bias: DepthBias) void {
+        self.rasterization.depth_bias = bias;
+    }
+    pub fn fillMode(self: *GraphicsPipelineDesc, mode: FillMode) void {
+        self.rasterization.fill_mode = mode;
+    }
+    pub fn cullMode(self: *GraphicsPipelineDesc, mode: CullMode) void {
+        self.rasterization.cull_mode = mode;
+    }
+    pub fn frontCCW(self: *GraphicsPipelineDesc, ccw: bool) void {
+        self.rasterization.front_counter_clockwise = ccw;
+    }
+    pub fn depthClamp(self: *GraphicsPipelineDesc, clamp: bool) void {
+        self.rasterization.depth_clamp = clamp;
+    }
+    pub fn lineSmoothing(self: *GraphicsPipelineDesc, smoothing: bool) void {
+        self.rasterization.line_smoothing = smoothing;
+    }
+    pub fn conservativeRasterization(self: *GraphicsPipelineDesc, conservative: bool) void {
+        self.rasterization.conservative = conservative;
+    }
+
+    // multisample
+    /// only usable when rendering to a texture
+    /// and not a swapchain
+    pub fn multiSampleMask(self: *GraphicsPipelineDesc, mask: u32) void {
+        self.multisample.enabled = true;
+        self.multisample.sample_mask = mask;
+    }
+    /// only usable when rendering to a texture
+    /// and not a swapchain
+    pub fn multiSampleNum(self: *GraphicsPipelineDesc, num: u32) void {
+        self.multisample.enabled = true;
+        self.multisample.sample_num = num;
+    }
+    /// only usable when rendering to a texture
+    /// and not a swapchain
+    pub fn multiSampleAlphaToCoverage(self: *GraphicsPipelineDesc, alpha: bool) void {
+        self.multisample.enabled = true;
+        self.multisample.alpha_to_coverage = alpha;
+    }
+
+    // output merger
+    pub fn colorAttachments(
+        self: *GraphicsPipelineDesc,
+        attachments: []const ColorAttachment,
+    ) void {
+        self.output_merger.attachments = attachments;
+    }
+    pub fn depthAttachment(self: *GraphicsPipelineDesc, attachment: DepthAttachment) void {
+        self.output_merger.depth = attachment;
+    }
+    pub fn stencilAttachment(self: *GraphicsPipelineDesc, attachment: StencilAttachment) void {
+        self.output_merger.stencil = attachment;
+    }
+    pub fn depthStencilFormat(self: *GraphicsPipelineDesc, format: Format) void {
+        self.output_merger.depth_stencil_format = format;
+    }
+    pub fn outputMergeOp(self: *GraphicsPipelineDesc, op: LogicOp) void {
+        self.output_merger.logic_op = op;
+    }
 
     pub fn addShader(self: *GraphicsPipelineDesc, shader: ShaderDesc) void {
-        self.shaders[self.shader_num] = shader;
-        self.shader_num += 1;
+        self.shaders.add(shader);
     }
 };
 
 pub const ComputePipelineDesc = struct {
-    layout: PipelineLayout,
-    shader: ShaderDesc,
+    layout: *PipelineLayout,
+    shaders: ShaderContainer = .{},
+
+    pub fn init(layout: *PipelineLayout) ComputePipelineDesc {
+        return .{ .layout = layout };
+    }
+
+    pub fn addShader(self: *ComputePipelineDesc, sh: ShaderDesc) void {
+        self.shaders.add(sh);
+    }
 };
 
 pub const TextureRegion = struct {
@@ -1474,14 +1542,14 @@ pub const TextureDataLayout = struct {
 };
 
 pub const ClearBufferDesc = struct {
-    buffer: Resource,
+    buffer: *Resource,
     value: u32 = 0,
     binding_index: u32,
     resource_index: u32 = 0,
 };
 
 pub const ClearTextureDesc = struct {
-    texture: Resource,
+    texture: *Resource,
     value: ClearValue,
     binding_index: u32,
     resource_index: u32 = 0,
@@ -1503,12 +1571,11 @@ pub const DrawIndexed = struct {
 };
 
 pub const DrawIndirect = struct {
-    buffer: Buffer,
+    buffer: *Buffer,
     offset: u64,
     count: u32,
     stride: u32,
-    /// can be .null
-    count_buffer: Buffer = .null,
+    count_buffer: ?*Buffer = null,
     count_offset: u64 = 0,
 };
 
@@ -1519,7 +1586,7 @@ pub const Dispatch = struct {
 };
 
 pub const DispatchIndirect = struct {
-    buffer: Buffer,
+    buffer: *Buffer,
     offset: u64,
 };
 
@@ -1563,8 +1630,8 @@ pub const AdapterDesc = struct {
 pub const SwapchainDesc = struct {
     name: []const u8 = &.{},
 
-    window: foxlily.Window,
-    queue: CommandQueue = .primary,
+    window: ila.Window,
+    queue: *CommandQueue,
     size: Vec2u,
     texture_num: u32 = 2,
     format: Format,
@@ -1603,4 +1670,4 @@ const builtin = @import("builtin");
 
 pub const config = @import("config");
 
-const foxlily = @import("root.zig");
+const ila = @import("root.zig");

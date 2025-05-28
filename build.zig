@@ -49,12 +49,13 @@ pub fn build(b: *std.Build) void {
             }),
             .linkage = .static,
         });
-        d3d12ma_lib.root_module.sanitize_c = false;
+        d3d12ma_lib.root_module.sanitize_c = .off;
         d3d12ma_lib.linkLibCpp();
         d3d12ma_lib.addCSourceFile(.{
             .file = d3d12ma.path("src/build.cpp"),
             .flags = &.{
                 "-Wno-address-of-temporary",
+                "-Wno-tautological-undefined-compare",
             },
         });
         d3d12ma_lib.addIncludePath(d3d12ma.path("include"));
@@ -69,24 +70,25 @@ pub fn build(b: *std.Build) void {
         lib_mod.addImport("zwindows", zwindows.module("zwindows"));
     }
 
-    const exe_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    exe_mod.addImport("foxlily", lib_mod);
-
     const lib = b.addLibrary(.{
         .linkage = .static,
-        .name = "foxlily",
+        .name = "ila",
         .root_module = lib_mod,
     });
 
     b.installArtifact(lib);
 
+    const exe_mod = b.createModule(.{
+        .root_source_file = b.path("sandbox/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ila", .module = lib_mod },
+        },
+    });
+
     const exe = b.addExecutable(.{
-        .name = "runoff",
+        .name = "sandbox",
         .root_module = exe_mod,
     });
 

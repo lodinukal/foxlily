@@ -1,3 +1,4 @@
 .zig-cache
 zig-out
 src/compiled_shaders
+sandbox/compiled_shaders

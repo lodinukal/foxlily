@@ -20,7 +20,7 @@ vertex_to_pixel vertex(in vertex_info IN, uint id : SV_VertexID)
     return OUT;
 };
 
-float4 pixel(in vertex_to_pixel IN) : SV_TARGET
+float4 fragment(in vertex_to_pixel IN) : SV_TARGET
 {
     return float4(IN.color, 1.0);
 };

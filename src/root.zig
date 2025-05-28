@@ -2,6 +2,8 @@ const std = @import("std");
 
 pub const gpu = @import("gpu.zig");
 pub const sdl = @import("sdl.zig");
+pub const media = @import("media.zig");
+pub const render = @import("render.zig");
 
 pub const Window = extern struct {
     pub const Error = error{
@@ -9,6 +11,8 @@ pub const Window = extern struct {
     };
 
     impl: *sdl.c.SDL_Window,
+    cached_width: u32 = 0,
+    cached_height: u32 = 0,
 
     pub const Flags = extern struct {
         fullscreen: bool = false,
@@ -48,77 +52,61 @@ pub const Window = extern struct {
         if (created == null) {
             return error.WindowCreationFailed;
         }
-        return Window{ .impl = created.? };
+        return .{
+            .impl = created.?,
+            .cached_width = width,
+            .cached_height = height,
+        };
     }
 
     pub fn deinit(self: *Window) void {
         sdl.c.SDL_DestroyWindow(self.impl);
     }
+
+    pub const MessageBoxFlags = packed struct(u32) {
+        returnkey_default: bool = false,
+        escapekey_default: bool = false,
+        _padding_1: u2 = 0,
+        err: bool = false,
+        warning: bool = false,
+        info: bool = false,
+        buttons_left_to_right: bool = false,
+        buttons_right_to_left: bool = false,
+        _padding_2: u23 = 0,
+
+        pub const _info: MessageBoxFlags = .{
+            .info = true,
+        };
+    };
+
+    pub fn messageBox(self: Window, flags: MessageBoxFlags, title: []const u8, message: []const u8) void {
+        const result = sdl.c.SDL_ShowSimpleMessageBox(
+            @bitCast(flags),
+            title.ptr,
+            message.ptr,
+            self.impl,
+        );
+        _ = result;
+    }
 };
 
-pub fn Optional(comptime T: type) type {
-    return extern struct {
-        has_value: bool = false,
-        value: T = undefined,
+/// an override for the gpu init, allocator
+var gpu_init: ?gpu.InitDesc = null;
 
-        pub const none: @This() = .{ .has_value = false };
-
-        pub inline fn some(value: T) @This() {
-            return .{ .has_value = true, .value = value };
-        }
-
-        pub inline fn to(self: @This()) ?T {
-            return if (self.has_value) self.value else null;
-        }
-
-        pub inline fn toRef(self: @This()) ?*T {
-            return if (self.has_value) @ptrCast(&self.value) else null;
-        }
-    };
+pub fn setGpuInitDesc(desc: gpu.InitDesc) void {
+    gpu_init = desc;
 }
 
-/// external constant slice
-pub fn Slice(comptime T: type) type {
-    return extern struct {
-        pub const Ptr = ?[*]const T;
-        pub const ZigSlice = []const T;
-
-        ptr: Ptr = null,
-        len: usize = 0,
-
-        pub inline fn one(ptr: *const T) @This() {
-            return .{ .ptr = @ptrCast(ptr), .len = 1 };
-        }
-
-        pub inline fn from(slice: ZigSlice) @This() {
-            return .{ .ptr = slice.ptr, .len = slice.len };
-        }
-
-        pub inline fn to(self: @This()) ZigSlice {
-            return if (self.ptr) |ptr| ptr[0..self.len] else &.{};
-        }
-    };
+pub fn init(allocator: std.mem.Allocator) !void {
+    try gpu.init(gpu_init orelse .{ .allocator = allocator });
 }
 
-/// external mutable slice
-pub fn MutableSlice(comptime T: type) type {
-    return extern struct {
-        pub const Ptr = ?[*]T;
-        pub const ZigSlice = []T;
+pub fn deinit() void {
+    gpu.deinit();
+}
 
-        ptr: Ptr = null,
-        len: usize = 0,
-
-        pub inline fn one(ptr: *const T) @This() {
-            return .{ .ptr = @ptrCast(ptr), .len = 1 };
-        }
-
-        pub inline fn from(slice: ZigSlice) @This() {
-            return .{ .ptr = slice.ptr, .len = slice.len };
-        }
-
-        pub inline fn to(self: @This()) ZigSlice {
-            return if (self.ptr) |ptr| ptr[0..self.len] else &.{};
-        }
-    };
+comptime {
+    _ = sdl;
+    _ = gpu;
+    _ = media;
 }

@@ -1,3 +1,8 @@
+const max_cbv_srv_uav_staging = 32 * 1024;
+const max_sampler_staging = 2048; // 2k - 1
+const max_render_targets = 256;
+const max_depth_stencils = 256;
+
 const D3D12Backend = @This();
 var s_instance: ?D3D12Backend = null;
 
@@ -5,12 +10,7 @@ fn getInstance() !*D3D12Backend {
     return &(s_instance orelse return error.NotInitialized);
 }
 
-const TEMP_BUFFER_SIZE = 4096;
-
 allocator: std.mem.Allocator,
-fba: std.heap.FixedBufferAllocator,
-temp_buf: []u8,
-temp_fba: std.heap.FixedBufferAllocator,
 desc: gpu.InitDesc,
 
 factory: *dxgi.IFactory5,
@@ -26,16 +26,7 @@ gpu_heaps: [2]D3DDescriptorHeap = undefined,
 
 mem_allocator: *d3d12ma.Allocator = undefined,
 
-command_queues: util.Pool(D3DCommandQueue, u32) = undefined,
-command_buffers: util.Pool(D3DCommandBuffer, u32) = undefined,
-pipeline_layouts: util.Pool(D3DPipelineLayout, u32) = undefined,
-pipelines: util.Pool(D3DPipeline, u32) = undefined,
-buffers: util.Pool(D3DBuffer, u32) = undefined,
-textures: util.Pool(D3DTexture, u32) = undefined,
-fences: util.Pool(D3DFence, u32) = undefined,
-resources: util.Pool(D3DResource, u32) = undefined,
-resource_sets: util.Pool(D3DResourceSet, u32) = undefined,
-swapchains: util.Pool(D3DSwapchain, u32) = undefined,
+primary_queue: *gpu.CommandQueue = undefined,
 
 pub fn init(desc: gpu.InitDesc) gpu.Error!void {
     if (s_instance) |_| {
@@ -88,29 +79,13 @@ pub fn init(desc: gpu.InitDesc) gpu.Error!void {
     }
 
     s_instance = .{
-        .allocator = s_instance.?.fba.allocator(),
-        .fba = .init(desc.memory),
-        .temp_buf = try s_instance.?.allocator.alloc(u8, TEMP_BUFFER_SIZE),
-        .temp_fba = .init(s_instance.?.temp_buf),
+        .allocator = desc.allocator,
         .desc = desc,
         .factory = factory.?,
     };
 
     const instance = try getInstance();
     const limits = instance.desc.limits;
-
-    try instance.command_queues.init(instance.allocator, limits.max_command_queues);
-    try instance.command_buffers.init(instance.allocator, limits.max_command_buffers);
-    try instance.pipeline_layouts.init(instance.allocator, limits.max_pipeline_layouts);
-    try instance.pipelines.init(instance.allocator, limits.max_pipelines);
-    try instance.buffers.init(instance.allocator, limits.max_buffers);
-    // also allocate enough space for triple buffered swapchains
-    try instance.textures.init(instance.allocator, limits.max_textures + limits.max_swapchains * gpu.MAX_SWAPCHAIN_IMAGES);
-    try instance.fences.init(instance.allocator, limits.max_fences);
-    try instance.resources.init(instance.allocator, limits.max_samplers +
-        limits.max_textures + limits.max_buffers);
-    try instance.resource_sets.init(instance.allocator, limits.max_resource_sets);
-    try instance.swapchains.init(instance.allocator, limits.max_swapchains);
 
     const hr_enumadapters = instance.factory.EnumAdapters1(0, @ptrCast(&instance.adapter));
     if (hr_enumadapters != windows.S_OK) {
@@ -141,7 +116,6 @@ pub fn init(desc: gpu.InitDesc) gpu.Error!void {
     if (hr_createdevice != windows.S_OK) {
         return error.D3D12InternalError;
     }
-    instance.setDebugName(@ptrCast(instance.device), s_instance.?.desc.name);
 
     if (instance.desc.validation != .none) {
         var info_queue: ?*d3d12d.IInfoQueue = null;
@@ -162,10 +136,10 @@ pub fn init(desc: gpu.InitDesc) gpu.Error!void {
     }
 
     var staging_heap_nums: [@typeInfo(d3d12.DESCRIPTOR_HEAP_TYPE).@"enum".fields.len]u32 = undefined;
-    staging_heap_nums[@intFromEnum(d3d12.DESCRIPTOR_HEAP_TYPE.SAMPLER)] = limits.max_samplers;
-    staging_heap_nums[@intFromEnum(d3d12.DESCRIPTOR_HEAP_TYPE.CBV_SRV_UAV)] = limits.max_textures + limits.max_buffers;
-    staging_heap_nums[@intFromEnum(d3d12.DESCRIPTOR_HEAP_TYPE.RTV)] = limits.max_render_targets;
-    staging_heap_nums[@intFromEnum(d3d12.DESCRIPTOR_HEAP_TYPE.DSV)] = limits.max_depth_stencils;
+    staging_heap_nums[@intFromEnum(d3d12.DESCRIPTOR_HEAP_TYPE.SAMPLER)] = max_sampler_staging;
+    staging_heap_nums[@intFromEnum(d3d12.DESCRIPTOR_HEAP_TYPE.CBV_SRV_UAV)] = max_cbv_srv_uav_staging;
+    staging_heap_nums[@intFromEnum(d3d12.DESCRIPTOR_HEAP_TYPE.RTV)] = max_render_targets;
+    staging_heap_nums[@intFromEnum(d3d12.DESCRIPTOR_HEAP_TYPE.DSV)] = max_depth_stencils;
 
     for (staging_heap_nums, 0..) |count, heap_type_int| {
         const heap_type: d3d12.DESCRIPTOR_HEAP_TYPE = @enumFromInt(heap_type_int);
@@ -199,12 +173,10 @@ pub fn init(desc: gpu.InitDesc) gpu.Error!void {
     }
 
     // command queue (will be primary)
-    std.debug.assert(try initCommandQueue(.{
+    instance.primary_queue = try initCommandQueue(instance.allocator, .{
         .name = "Primary Queue",
         .kind = .graphics,
-    }) == .primary);
-
-    log.info("D3D12 backend initialized (using {} bytes)", .{instance.fba.end_index});
+    });
 
     return;
 }
@@ -214,18 +186,7 @@ pub fn deinit() void {
         defer s_instance = null;
         defer log.info("D3D12 backend deinitialized", .{});
 
-        deinitCommandQueue(.primary);
-
-        i.command_queues.deinit(i.allocator);
-        i.command_buffers.deinit(i.allocator);
-        i.pipeline_layouts.deinit(i.allocator);
-        i.pipelines.deinit(i.allocator);
-        i.buffers.deinit(i.allocator);
-        i.textures.deinit(i.allocator);
-        i.fences.deinit(i.allocator);
-        i.resources.deinit(i.allocator);
-        i.resource_sets.deinit(i.allocator);
-        i.swapchains.deinit(i.allocator);
+        deinitCommandQueue(i.primary_queue);
 
         i.mem_allocator.Release();
 
@@ -239,8 +200,6 @@ pub fn deinit() void {
 
         _ = i.device.Release();
         _ = i.adapter.Release();
-
-        i.allocator.free(i.temp_buf);
 
         _ = i.factory.Release();
     }
@@ -359,6 +318,8 @@ fn getGpuHeapCpuPointer(handle: D3DDescriptor, offset: usize) d3d12.CPU_DESCRIPT
 }
 
 const D3DResource = struct {
+    allocator: std.mem.Allocator,
+
     resource: *d3d12.IResource,
     buffer_gpu_location: d3d12.GPU_VIRTUAL_ADDRESS,
     cpu_descriptor: d3d12.CPU_DESCRIPTOR_HANDLE,
@@ -436,11 +397,10 @@ const D3DResource = struct {
 };
 
 pub fn initTextureResource(
+    allocator: std.mem.Allocator,
     desc: gpu.TextureResourceDesc,
-) gpu.Error!gpu.Resource {
-    const instance = try getInstance();
-    const texture_idx: usize = @intFromEnum(desc.texture);
-    const texture_ptr: *D3DTexture = instance.textures.get(texture_idx) orelse return error.InvalidTexture;
+) gpu.Error!*gpu.Resource {
+    const texture_ptr: *D3DTexture = @ptrCast(@alignCast(desc.texture));
 
     const remaining_mips = if (desc.mip_num == 0) (texture_ptr.desc.mip_num - desc.mip_start) else desc.mip_num;
     const remaining_layers = if (desc.layer_num == 0) (texture_ptr.desc.layer_num - desc.layer_start) else desc.layer_num;
@@ -462,7 +422,8 @@ pub fn initTextureResource(
         .d3 => .TEXTURE3D,
     };
 
-    const resource_idx, const resource_ptr = try instance.resources.alloc();
+    const resource_ptr = try allocator.create(D3DResource);
+    resource_ptr.allocator = allocator;
     resource_ptr.resource = texture_ptr.d3d_texture;
     resource_ptr.view_kind = desc.kind;
     resource_ptr.heap_type = .CBV_SRV_UAV;
@@ -539,17 +500,17 @@ pub fn initTextureResource(
         },
     }
 
-    return @enumFromInt(resource_idx);
+    return @ptrCast(resource_ptr);
 }
 
 pub fn initBufferResource(
+    allocator: std.mem.Allocator,
     desc: gpu.BufferResourceDesc,
-) gpu.Error!gpu.Resource {
-    const instance = try getInstance();
-    const buffer_idx: usize = @intFromEnum(desc.buffer);
-    const buffer_ptr: *D3DBuffer = instance.buffers.get(buffer_idx) orelse return error.InvalidTexture;
+) gpu.Error!*gpu.Resource {
+    const buffer_ptr: *D3DBuffer = @ptrCast(@alignCast(desc.buffer));
 
-    const resource_idx, const resource_ptr = try instance.resources.alloc();
+    const resource_ptr = try allocator.create(D3DResource);
+    resource_ptr.allocator = allocator;
     resource_ptr.resource = buffer_ptr.resource;
     resource_ptr.view_kind = desc.kind;
     resource_ptr.heap_type = .CBV_SRV_UAV;
@@ -593,13 +554,14 @@ pub fn initBufferResource(
         else => return error.InvalidResourceKind,
     }
 
-    return @enumFromInt(resource_idx);
+    return @ptrCast(resource_ptr);
 }
 
-pub fn initSampler(desc: gpu.SamplerDesc) gpu.Error!gpu.Resource {
+pub fn initSampler(allocator: std.mem.Allocator, desc: gpu.SamplerDesc) gpu.Error!*gpu.Resource {
     const instance = try getInstance();
 
-    const resource_idx, const resource_ptr = try instance.resources.alloc();
+    const resource_ptr = try allocator.create(D3DResource);
+    resource_ptr.allocator = allocator;
     resource_ptr.cpu_handle = try allocateStagingHeapDescriptor(.SAMPLER);
     resource_ptr.cpu_descriptor = getStagingHeapCpuPointer(resource_ptr.cpu_handle);
     resource_ptr.heap_type = .SAMPLER;
@@ -644,30 +606,28 @@ pub fn initSampler(desc: gpu.SamplerDesc) gpu.Error!gpu.Resource {
 
     instance.device.CreateSampler(&sampler_desc, resource_ptr.cpu_descriptor);
 
-    return @enumFromInt(resource_idx);
+    return @ptrCast(resource_ptr);
 }
 
-pub fn deinitResource(resource: gpu.Resource) void {
-    const instance = getInstance() catch return;
-    const resource_idx: usize = @intFromEnum(resource);
-    const resource_ptr: *D3DResource = instance.resources.get(resource_idx) orelse return;
-
+pub fn deinitResource(resource: *gpu.Resource) void {
+    const resource_ptr: *D3DResource = @ptrCast(@alignCast(resource));
     freeStagingHeapDescriptor(resource_ptr.cpu_handle);
-    instance.resources.free(resource_idx);
+    resource_ptr.allocator.destroy(resource_ptr);
 }
 
 const D3DResourceSet = struct {
+    allocator: std.mem.Allocator,
+
     bound: std.BoundedArray(D3DDescriptor, gpu.MAX_BINDINGS),
     is_set: std.BoundedArray(bool, gpu.MAX_BINDINGS),
     pipeline_layout: *D3DPipelineLayout,
 };
 
-pub fn initResourceSet(pipeline_layout: gpu.PipelineLayout) !gpu.ResourceSet {
-    const instance = try getInstance();
-    const pipeline_layout_idx: usize = @intFromEnum(pipeline_layout);
-    const pipeline_layout_ptr: *D3DPipelineLayout = instance.pipeline_layouts.get(pipeline_layout_idx) orelse return error.InvalidPipelineLayout;
+pub fn initResourceSet(allocator: std.mem.Allocator, pipeline_layout: *gpu.PipelineLayout) gpu.Error!*gpu.ResourceSet {
+    const pipeline_layout_ptr: *D3DPipelineLayout = @ptrCast(@alignCast(pipeline_layout));
 
-    const resource_set_idx, const resource_set_ptr = try instance.resource_sets.alloc();
+    const resource_set_ptr = try allocator.create(D3DResourceSet);
+    resource_set_ptr.allocator = allocator;
     resource_set_ptr.pipeline_layout = pipeline_layout_ptr;
     resource_set_ptr.bound = .{};
     resource_set_ptr.is_set = .{};
@@ -694,28 +654,23 @@ pub fn initResourceSet(pipeline_layout: gpu.PipelineLayout) !gpu.ResourceSet {
         try resource_set_ptr.is_set.append(false);
     }
 
-    return @enumFromInt(resource_set_idx);
+    return @ptrCast(resource_set_ptr);
 }
 
-pub fn deinitResourceSet(resource_set: gpu.ResourceSet) void {
-    const instance = getInstance() catch return;
-    const resource_set_idx: usize = @intFromEnum(resource_set);
-    const resource_set_ptr: *D3DResourceSet = instance.resource_sets.get(resource_set_idx) orelse return;
+pub fn deinitResourceSet(resource_set: *gpu.ResourceSet) void {
+    const resource_set_ptr: *D3DResourceSet = @ptrCast(@alignCast(resource_set));
 
     for (resource_set_ptr.bound.constSlice()) |descriptor| {
         freeGpuHeapDescriptor(descriptor);
     }
 
-    instance.resource_sets.free(resource_set_idx);
+    resource_set_ptr.allocator.destroy(resource_set_ptr);
 }
 
-pub fn setResource(resource_set: gpu.ResourceSet, binding: u32, offset: u32, resource: gpu.Resource) gpu.Error!void {
+pub fn setResource(resource_set: *gpu.ResourceSet, binding: u32, offset: u32, resource: *gpu.Resource) gpu.Error!void {
     const instance = try getInstance();
-    const resource_set_idx: usize = @intFromEnum(resource_set);
-    const resource_set_ptr: *D3DResourceSet = instance.resource_sets.get(resource_set_idx) orelse return error.InvalidResourceSet;
-
-    const resource_idx: usize = @intFromEnum(resource);
-    const resource_ptr: *D3DResource = instance.resources.get(resource_idx) orelse return error.InvalidResource;
+    const resource_set_ptr: *D3DResourceSet = @ptrCast(@alignCast(resource_set));
+    const resource_ptr: *D3DResource = @ptrCast(@alignCast(resource));
 
     if (binding >= resource_set_ptr.bound.len) {
         return error.InvalidResourceBinding;
@@ -763,11 +718,18 @@ pub fn setResource(resource_set: gpu.ResourceSet, binding: u32, offset: u32, res
 }
 
 const D3DCommandQueue = struct {
+    allocator: std.mem.Allocator,
+
     d3d_queue: *d3d12.ICommandQueue,
 };
-pub fn initCommandQueue(desc: gpu.CommandQueueDesc) !gpu.CommandQueue {
+pub fn primaryQueue() *gpu.CommandQueue {
+    const instance = getInstance() catch unreachable;
+    return @ptrCast(instance.primary_queue);
+}
+pub fn initCommandQueue(allocator: std.mem.Allocator, desc: gpu.CommandQueueDesc) !*gpu.CommandQueue {
     const instance = try getInstance();
-    const queue_idx, const queue_ptr = try instance.command_queues.alloc();
+    const queue_ptr = try allocator.create(D3DCommandQueue);
+    queue_ptr.allocator = allocator;
 
     const queue_desc: d3d12.COMMAND_QUEUE_DESC = .{
         .Type = switch (desc.kind) {
@@ -788,26 +750,20 @@ pub fn initCommandQueue(desc: gpu.CommandQueueDesc) !gpu.CommandQueue {
     if (hr_createqueue != windows.S_OK) {
         return error.D3D12InternalError;
     }
-    instance.setDebugName(@ptrCast(queue_ptr.d3d_queue), desc.name);
+    setDebugName(@ptrCast(queue_ptr.d3d_queue), desc.name);
 
-    return @enumFromInt(queue_idx);
+    return @ptrCast(queue_ptr);
 }
 
-pub fn deinitCommandQueue(queue: gpu.CommandQueue) void {
-    const instance = getInstance() catch return;
-    const queue_idx: usize = @intFromEnum(queue);
-    const queue_ptr: *D3DCommandQueue = instance.command_queues.get(queue_idx) orelse return;
-
+pub fn deinitCommandQueue(queue: *gpu.CommandQueue) void {
+    const queue_ptr: *D3DCommandQueue = @ptrCast(@alignCast(queue));
     _ = queue_ptr.d3d_queue.Release();
-    instance.command_queues.free(queue_idx);
+    queue_ptr.allocator.destroy(queue_ptr);
 }
 
-pub fn signalFence(queue: gpu.CommandQueue, fence: gpu.Fence, value: u64) gpu.Error!void {
-    const instance = try getInstance();
-    const queue_idx: usize = @intFromEnum(queue);
-    const queue_ptr: *D3DCommandQueue = instance.command_queues.get(queue_idx) orelse return error.InvalidCommandQueue;
-    const fence_idx: usize = @intFromEnum(fence);
-    const fence_ptr: *D3DFence = instance.fences.get(fence_idx) orelse return error.InvalidFence;
+pub fn signalFence(queue: *gpu.CommandQueue, fence: *gpu.Fence, value: u64) gpu.Error!void {
+    const queue_ptr: *D3DCommandQueue = @ptrCast(@alignCast(queue));
+    const fence_ptr: *D3DFence = @ptrCast(@alignCast(fence));
 
     const hr_signal = queue_ptr.d3d_queue.Signal(fence_ptr.d3d_fence, value);
     if (hr_signal != windows.S_OK) {
@@ -817,12 +773,9 @@ pub fn signalFence(queue: gpu.CommandQueue, fence: gpu.Fence, value: u64) gpu.Er
     return;
 }
 
-pub fn waitFence(queue: gpu.CommandQueue, fence: gpu.Fence, value: u64) gpu.Error!void {
-    const instance = try getInstance();
-    const queue_idx: usize = @intFromEnum(queue);
-    const queue_ptr: *D3DCommandQueue = instance.command_queues.get(queue_idx) orelse return error.InvalidCommandQueue;
-    const fence_idx: usize = @intFromEnum(fence);
-    const fence_ptr: *D3DFence = instance.fences.get(fence_idx) orelse return error.InvalidFence;
+pub fn waitFence(queue: *gpu.CommandQueue, fence: *gpu.Fence, value: u64) gpu.Error!void {
+    const queue_ptr: *D3DCommandQueue = @ptrCast(@alignCast(queue));
+    const fence_ptr: *D3DFence = @ptrCast(@alignCast(fence));
 
     const hr_wait = queue_ptr.d3d_queue.Signal(fence_ptr.d3d_fence, value);
     if (hr_wait != windows.S_OK) {
@@ -832,18 +785,17 @@ pub fn waitFence(queue: gpu.CommandQueue, fence: gpu.Fence, value: u64) gpu.Erro
     return;
 }
 
-pub fn submitQueue(queue: gpu.CommandQueue, cmd: gpu.CommandBuffer) gpu.Error!void {
-    const instance = try getInstance();
-    const queue_idx: usize = @intFromEnum(queue);
-    const queue_ptr: *D3DCommandQueue = instance.command_queues.get(queue_idx) orelse return error.InvalidCommandQueue;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return error.InvalidCommandBuffer;
+pub fn submitQueue(queue: *gpu.CommandQueue, cmd: *gpu.CommandBuffer) gpu.Error!void {
+    const queue_ptr: *D3DCommandQueue = @ptrCast(@alignCast(queue));
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
 
     const command_lists: [*]const *d3d12.ICommandList = @ptrCast(&cmd_ptr.command_list);
     queue_ptr.d3d_queue.ExecuteCommandLists(1, command_lists);
 }
 
 const D3DCommandBuffer = struct {
+    allocator: std.mem.Allocator,
+
     queue: *D3DCommandQueue,
     command_allocator: *d3d12.ICommandAllocator,
     command_list: *d3d12.IGraphicsCommandList4,
@@ -856,11 +808,11 @@ const D3DCommandBuffer = struct {
     resource_set: ?*D3DResourceSet,
     is_graphics: bool,
 };
-pub fn initCommandBuffer(queue: gpu.CommandQueue) gpu.Error!gpu.CommandBuffer {
+pub fn initCommandBuffer(allocator: std.mem.Allocator, queue: *gpu.CommandQueue) gpu.Error!*gpu.CommandBuffer {
     const instance = try getInstance();
-    const queue_idx: usize = @intFromEnum(queue);
-    const queue_ptr: *D3DCommandQueue = instance.command_queues.get(queue_idx) orelse return error.InvalidCommandQueue;
-    const cmd_idx, const cmd_ptr = try instance.command_buffers.alloc();
+    const queue_ptr: *D3DCommandQueue = @ptrCast(@alignCast(queue));
+    const cmd_ptr = try allocator.create(D3DCommandBuffer);
+    cmd_ptr.allocator = allocator;
 
     const hr_createallocator = instance.device.CreateCommandAllocator(
         .DIRECT,
@@ -895,24 +847,21 @@ pub fn initCommandBuffer(queue: gpu.CommandQueue) gpu.Error!gpu.CommandBuffer {
     // ignore error here; should not happen
     _ = cmd_ptr.command_list.Close();
 
-    return @enumFromInt(cmd_idx);
+    return @ptrCast(cmd_ptr);
 }
 
-pub fn deinitCommandBuffer(cmd: gpu.CommandBuffer) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
+pub fn deinitCommandBuffer(cmd: *gpu.CommandBuffer) void {
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
 
     _ = cmd_ptr.command_list.Release();
     _ = cmd_ptr.command_allocator.Release();
 
-    instance.command_buffers.free(cmd_idx);
+    cmd_ptr.allocator.destroy(cmd_ptr);
 }
 
-pub fn beginCommandBuffer(cmd: gpu.CommandBuffer) gpu.Error!void {
+pub fn beginCommandBuffer(cmd: *gpu.CommandBuffer) gpu.Error!void {
     const instance = try getInstance();
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return error.InvalidCommandBuffer;
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
 
     const hr_resetallocator = cmd_ptr.command_allocator.Reset();
     if (hr_resetallocator != windows.S_OK) {
@@ -942,10 +891,8 @@ pub fn beginCommandBuffer(cmd: gpu.CommandBuffer) gpu.Error!void {
     return;
 }
 
-pub fn endCommandBuffer(cmd: gpu.CommandBuffer) gpu.Error!void {
-    const instance = try getInstance();
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return error.InvalidCommandBuffer;
+pub fn endCommandBuffer(cmd: *gpu.CommandBuffer) gpu.Error!void {
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
 
     const hr_close = cmd_ptr.command_list.Close();
     if (hr_close != windows.S_OK) {
@@ -955,10 +902,8 @@ pub fn endCommandBuffer(cmd: gpu.CommandBuffer) gpu.Error!void {
     return;
 }
 
-pub fn setViewports(cmd: gpu.CommandBuffer, viewports: []const gpu.Viewport) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
+pub fn setViewports(cmd: *gpu.CommandBuffer, viewports: []const gpu.Viewport) void {
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
 
     var d3d_viewports: [gpu.MAX_VIEWPORTS]d3d12.VIEWPORT = undefined;
     for (viewports, 0..) |v, i| {
@@ -976,10 +921,8 @@ pub fn setViewports(cmd: gpu.CommandBuffer, viewports: []const gpu.Viewport) voi
     cmd_ptr.command_list.RSSetViewports(@intCast(viewports.len), &d3d_viewports);
 }
 
-pub fn setScissors(cmd: gpu.CommandBuffer, scissors: []const gpu.Rect) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
+pub fn setScissors(cmd: *gpu.CommandBuffer, scissors: []const gpu.Rect) void {
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
 
     var d3d_scissors: [gpu.MAX_SCISSORS]d3d12.RECT = undefined;
     for (scissors, 0..) |s, i| {
@@ -994,29 +937,22 @@ pub fn setScissors(cmd: gpu.CommandBuffer, scissors: []const gpu.Rect) void {
     cmd_ptr.command_list.RSSetScissorRects(@intCast(scissors.len), &d3d_scissors);
 }
 
-pub fn setDepthBounds(cmd: gpu.CommandBuffer, min: f32, max: f32) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
-
+pub fn setDepthBounds(cmd: *gpu.CommandBuffer, min: f32, max: f32) void {
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
     cmd_ptr.command_list.OMSetDepthBounds(min, max);
 }
 
-pub fn setStencilReference(cmd: gpu.CommandBuffer, ref: u8) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
+pub fn setStencilReference(cmd: *gpu.CommandBuffer, ref: u8) void {
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
     cmd_ptr.command_list.OMSetStencilRef(ref);
 }
 
 pub fn clearAttachment(
-    cmd: gpu.CommandBuffer,
+    cmd: *gpu.CommandBuffer,
     clear: gpu.Clear,
     rect: gpu.Rect,
 ) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
 
     const d3d_rect: d3d12.RECT = .{
         .left = rect.x,
@@ -1067,18 +1003,15 @@ pub fn clearAttachment(
     }
 }
 
-pub fn clearBuffer(cmd: gpu.CommandBuffer, desc: gpu.ClearBufferDesc) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
+pub fn clearBuffer(cmd: *gpu.CommandBuffer, desc: gpu.ClearBufferDesc) void {
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
 
     const resource_set = cmd_ptr.resource_set orelse {
         log.err("Resource set not set", .{});
         return;
     };
 
-    const resource_idx: usize = @intFromEnum(desc.resource);
-    const resource_ptr: *D3DResource = instance.resources.get(resource_idx) orelse return;
+    const resource_ptr: *D3DResource = @ptrCast(@alignCast(desc.buffer));
 
     const binding = desc.binding_index;
     if (binding >= gpu.MAX_BINDINGS) {
@@ -1111,18 +1044,15 @@ pub fn clearBuffer(cmd: gpu.CommandBuffer, desc: gpu.ClearBufferDesc) void {
     );
 }
 
-pub fn clearTexture(cmd: gpu.CommandBuffer, desc: gpu.ClearTextureDesc) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
+pub fn clearTexture(cmd: *gpu.CommandBuffer, desc: gpu.ClearTextureDesc) void {
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
 
     const resource_set = cmd_ptr.resource_set orelse {
         log.err("Resource set not set", .{});
         return;
     };
 
-    const resource_idx: usize = @intFromEnum(desc.resource);
-    const resource_ptr: *D3DResource = instance.resources.get(resource_idx) orelse return;
+    const resource_ptr: *D3DResource = @ptrCast(@alignCast(desc.texture));
 
     const binding = desc.binding_index;
     if (binding >= gpu.MAX_BINDINGS) {
@@ -1171,32 +1101,14 @@ pub fn clearTexture(cmd: gpu.CommandBuffer, desc: gpu.ClearTextureDesc) void {
 }
 
 pub fn setVertexBuffer(
-    cmd: gpu.CommandBuffer,
+    cmd: *gpu.CommandBuffer,
     slot: u32,
-    buffer: gpu.Buffer,
+    buffer: *gpu.Buffer,
     offset: u64,
 ) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
 
-    if (buffer == .null) {
-        const vertex_buffer_view: d3d12.VERTEX_BUFFER_VIEW = .{
-            .BufferLocation = 0,
-            .SizeInBytes = 0,
-            .StrideInBytes = 0,
-        };
-
-        cmd_ptr.command_list.IASetVertexBuffers(
-            @intCast(slot),
-            1,
-            @ptrCast(&vertex_buffer_view),
-        );
-        return;
-    }
-
-    const buffer_idx: usize = @intFromEnum(buffer);
-    const buffer_ptr: *D3DBuffer = instance.buffers.get(buffer_idx) orelse return;
+    const buffer_ptr: *D3DBuffer = @ptrCast(@alignCast(buffer));
 
     const vertex_buffer_view: d3d12.VERTEX_BUFFER_VIEW = .{
         .BufferLocation = buffer_ptr.resource.GetGPUVirtualAddress() + offset,
@@ -1211,27 +1123,14 @@ pub fn setVertexBuffer(
 }
 
 pub fn setIndexBuffer(
-    cmd: gpu.CommandBuffer,
-    buffer: gpu.Buffer,
+    cmd: *gpu.CommandBuffer,
+    buffer: *gpu.Buffer,
     offset: u64,
     kind: gpu.IndexKind,
 ) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
 
-    if (buffer == .null) {
-        const index_buffer_view: d3d12.INDEX_BUFFER_VIEW = .{
-            .BufferLocation = 0,
-            .SizeInBytes = 0,
-            .Format = .UNKNOWN,
-        };
-        cmd_ptr.command_list.IASetIndexBuffer(&index_buffer_view);
-        return;
-    }
-
-    const buffer_idx: usize = @intFromEnum(buffer);
-    const buffer_ptr: *D3DBuffer = instance.buffers.get(buffer_idx) orelse return;
+    const buffer_ptr: *D3DBuffer = @ptrCast(@alignCast(buffer));
 
     const index_buffer_view: d3d12.INDEX_BUFFER_VIEW = .{
         .BufferLocation = buffer_ptr.resource.GetGPUVirtualAddress() + offset,
@@ -1245,14 +1144,11 @@ pub fn setIndexBuffer(
 }
 
 pub fn setPipelineLayout(
-    cmd: gpu.CommandBuffer,
-    pipeline_layout: gpu.PipelineLayout,
+    cmd: *gpu.CommandBuffer,
+    pipeline_layout: *gpu.PipelineLayout,
 ) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
-    const pipeline_layout_idx: usize = @intFromEnum(pipeline_layout);
-    const pipeline_layout_ptr: *D3DPipelineLayout = instance.pipeline_layouts.get(pipeline_layout_idx) orelse return;
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
+    const pipeline_layout_ptr: *D3DPipelineLayout = @ptrCast(@alignCast(pipeline_layout));
 
     cmd_ptr.pipeline_layout = pipeline_layout_ptr;
     cmd_ptr.pipeline = null;
@@ -1265,14 +1161,11 @@ pub fn setPipelineLayout(
 }
 
 pub fn setPipeline(
-    cmd: gpu.CommandBuffer,
-    pipeline: gpu.Pipeline,
+    cmd: *gpu.CommandBuffer,
+    pipeline: *gpu.Pipeline,
 ) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
-    const pipeline_idx: usize = @intFromEnum(pipeline);
-    const pipeline_ptr: *D3DPipeline = instance.pipelines.get(pipeline_idx) orelse return;
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
+    const pipeline_ptr: *D3DPipeline = @ptrCast(@alignCast(pipeline));
 
     cmd_ptr.pipeline = pipeline_ptr;
 
@@ -1286,14 +1179,11 @@ pub fn setPipeline(
 }
 
 pub fn setResourceSet(
-    cmd: gpu.CommandBuffer,
-    resource_set: gpu.ResourceSet,
+    cmd: *gpu.CommandBuffer,
+    resource_set: *gpu.ResourceSet,
 ) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
-    const resource_set_idx: usize = @intFromEnum(resource_set);
-    const resource_set_ptr: *D3DResourceSet = instance.resource_sets.get(resource_set_idx) orelse return;
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
+    const resource_set_ptr: *D3DResourceSet = @ptrCast(@alignCast(resource_set));
 
     if (cmd_ptr.pipeline_layout != resource_set_ptr.pipeline_layout) {
         log.err("Pipeline layout not valid", .{});
@@ -1360,10 +1250,8 @@ pub fn setResourceSet(
     }
 }
 
-pub fn setConstant(cmd: gpu.CommandBuffer, data: []const u8) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
+pub fn setConstant(cmd: *gpu.CommandBuffer, data: []const u8) void {
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
 
     if (cmd_ptr.pipeline_layout == null) {
         log.err("Pipeline layout not set", .{});
@@ -1398,10 +1286,8 @@ pub fn setConstant(cmd: gpu.CommandBuffer, data: []const u8) void {
         );
 }
 
-pub fn draw(cmd: gpu.CommandBuffer, desc: gpu.Draw) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
+pub fn draw(cmd: *gpu.CommandBuffer, desc: gpu.Draw) void {
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
 
     if (cmd_ptr.is_graphics) {
         cmd_ptr.command_list.DrawInstanced(
@@ -1415,10 +1301,8 @@ pub fn draw(cmd: gpu.CommandBuffer, desc: gpu.Draw) void {
     }
 }
 
-pub fn drawIndexed(cmd: gpu.CommandBuffer, desc: gpu.DrawIndexed) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
+pub fn drawIndexed(cmd: *gpu.CommandBuffer, desc: gpu.DrawIndexed) void {
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
 
     if (cmd_ptr.is_graphics) {
         cmd_ptr.command_list.DrawIndexedInstanced(
@@ -1433,21 +1317,16 @@ pub fn drawIndexed(cmd: gpu.CommandBuffer, desc: gpu.DrawIndexed) void {
     }
 }
 
-pub fn drawIndirect(cmd: gpu.CommandBuffer, desc: gpu.DrawIndirect) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
+pub fn drawIndirect(cmd: *gpu.CommandBuffer, desc: gpu.DrawIndirect) void {
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
 
     const pipeline_layout = cmd_ptr.pipeline_layout orelse {
         log.err("Pipeline layout not set", .{});
         return;
     };
 
-    const buffer_idx: usize = @intFromEnum(desc.buffer);
-    const buffer_ptr: *D3DBuffer = instance.buffers.get(buffer_idx) orelse return;
-
-    const count_buffer_idx: usize = @intFromEnum(desc.count_buffer);
-    const count_buffer_ptr: ?*D3DBuffer = instance.buffers.get(count_buffer_idx);
+    const buffer_ptr: *D3DBuffer = @ptrCast(@alignCast(desc.buffer));
+    const count_buffer_ptr: ?*D3DBuffer = @ptrCast(@alignCast(desc.count_buffer));
 
     if (cmd_ptr.is_graphics) {
         cmd_ptr.command_list.ExecuteIndirect(
@@ -1466,21 +1345,16 @@ pub fn drawIndirect(cmd: gpu.CommandBuffer, desc: gpu.DrawIndirect) void {
     }
 }
 
-pub fn drawIndexedIndirect(cmd: gpu.CommandBuffer, desc: gpu.DrawIndirect) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
+pub fn drawIndexedIndirect(cmd: *gpu.CommandBuffer, desc: gpu.DrawIndirect) void {
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
 
     const pipeline_layout = cmd_ptr.pipeline_layout orelse {
         log.err("Pipeline layout not set", .{});
         return;
     };
 
-    const buffer_idx: usize = @intFromEnum(desc.buffer);
-    const buffer_ptr: *D3DBuffer = instance.buffers.get(buffer_idx) orelse return;
-
-    const count_buffer_idx: usize = @intFromEnum(desc.count_buffer);
-    const count_buffer_ptr: ?*D3DBuffer = instance.buffers.get(count_buffer_idx);
+    const buffer_ptr: *D3DBuffer = @ptrCast(@alignCast(desc.buffer));
+    const count_buffer_ptr: ?*D3DBuffer = @ptrCast(@alignCast(desc.count_buffer));
 
     if (cmd_ptr.is_graphics) {
         cmd_ptr.command_list.ExecuteIndirect(
@@ -1499,10 +1373,8 @@ pub fn drawIndexedIndirect(cmd: gpu.CommandBuffer, desc: gpu.DrawIndirect) void 
     }
 }
 
-pub fn dispatch(cmd: gpu.CommandBuffer, desc: gpu.Dispatch) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
+pub fn dispatch(cmd: *gpu.CommandBuffer, desc: gpu.Dispatch) void {
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
 
     if (!cmd_ptr.is_graphics) {
         cmd_ptr.command_list.Dispatch(
@@ -1515,18 +1387,15 @@ pub fn dispatch(cmd: gpu.CommandBuffer, desc: gpu.Dispatch) void {
     }
 }
 
-pub fn dispatchIndirect(cmd: gpu.CommandBuffer, desc: gpu.DispatchIndirect) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
+pub fn dispatchIndirect(cmd: *gpu.CommandBuffer, desc: gpu.DispatchIndirect) void {
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
 
     const pipeline_layout = cmd_ptr.pipeline_layout orelse {
         log.err("Pipeline layout not set", .{});
         return;
     };
 
-    const buffer_idx: usize = @intFromEnum(desc.buffer);
-    const buffer_ptr: *D3DBuffer = instance.buffers.get(buffer_idx) orelse return;
+    const buffer_ptr: *D3DBuffer = @ptrCast(@alignCast(desc.buffer));
 
     if (!cmd_ptr.is_graphics) {
         cmd_ptr.command_list.ExecuteIndirect(
@@ -1542,16 +1411,10 @@ pub fn dispatchIndirect(cmd: gpu.CommandBuffer, desc: gpu.DispatchIndirect) void
     }
 }
 
-pub fn copyBuffertoBuffer(cmd: gpu.CommandBuffer, dst: gpu.Buffer, dst_offset: u64, src: gpu.Buffer, src_offset: u64, size: u64) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
-
-    const dst_idx: usize = @intFromEnum(dst);
-    const dst_ptr: *D3DBuffer = instance.buffers.get(dst_idx) orelse return;
-
-    const src_idx: usize = @intFromEnum(src);
-    const src_ptr: *D3DBuffer = instance.buffers.get(src_idx) orelse return;
+pub fn copyBuffertoBuffer(cmd: *gpu.CommandBuffer, dst: *gpu.Buffer, dst_offset: u64, src: *gpu.Buffer, src_offset: u64, size: u64) void {
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
+    const dst_ptr: *D3DBuffer = @ptrCast(@alignCast(dst));
+    const src_ptr: *D3DBuffer = @ptrCast(@alignCast(src));
 
     cmd_ptr.command_list.CopyBufferRegion(
         dst_ptr.resource,
@@ -1563,21 +1426,15 @@ pub fn copyBuffertoBuffer(cmd: gpu.CommandBuffer, dst: gpu.Buffer, dst_offset: u
 }
 
 pub fn copyTextureToTexture(
-    cmd: gpu.CommandBuffer,
-    dst: gpu.Texture,
+    cmd: *gpu.CommandBuffer,
+    dst: *gpu.Texture,
     dst_region_opt: ?gpu.TextureRegion,
-    src: gpu.Texture,
+    src: *gpu.Texture,
     src_region_opt: ?gpu.TextureRegion,
 ) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
-
-    const dst_idx: usize = @intFromEnum(dst);
-    const dst_ptr: *D3DTexture = instance.textures.get(dst_idx) orelse return;
-
-    const src_idx: usize = @intFromEnum(src);
-    const src_ptr: *D3DTexture = instance.textures.get(src_idx) orelse return;
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
+    const dst_ptr: *D3DTexture = @ptrCast(@alignCast(dst));
+    const src_ptr: *D3DTexture = @ptrCast(@alignCast(src));
 
     if (dst_region_opt == null and src_region_opt == null) {
         cmd_ptr.command_list.CopyResource(
@@ -1637,21 +1494,15 @@ pub fn copyTextureToTexture(
 }
 
 pub fn copyBufferToTexture(
-    cmd: gpu.CommandBuffer,
-    dst: gpu.Texture,
+    cmd: *gpu.CommandBuffer,
+    dst: *gpu.Texture,
     dst_region_opt: ?gpu.TextureRegion,
-    src: gpu.Buffer,
+    src: *gpu.Buffer,
     src_data_layout: gpu.TextureDataLayout,
 ) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
-
-    const dst_idx: usize = @intFromEnum(dst);
-    const dst_ptr: *D3DTexture = instance.textures.get(dst_idx) orelse return;
-
-    const src_idx: usize = @intFromEnum(src);
-    const src_ptr: *D3DBuffer = instance.buffers.get(src_idx) orelse return;
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
+    const dst_ptr: *D3DTexture = @ptrCast(@alignCast(dst));
+    const src_ptr: *D3DBuffer = @ptrCast(@alignCast(src));
 
     const dst_region = dst_region_opt orelse .{};
 
@@ -1706,21 +1557,15 @@ pub fn copyBufferToTexture(
 }
 
 pub fn copyTextureToBuffer(
-    cmd: gpu.CommandBuffer,
-    dst: gpu.Buffer,
+    cmd: *gpu.CommandBuffer,
+    dst: *gpu.Buffer,
     dst_data_layout: gpu.TextureDataLayout,
-    src: gpu.Texture,
+    src: *gpu.Texture,
     src_region_opt: ?gpu.TextureRegion,
 ) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
-
-    const dst_idx: usize = @intFromEnum(dst);
-    const dst_ptr: *D3DBuffer = instance.buffers.get(dst_idx) orelse return;
-
-    const src_idx: usize = @intFromEnum(src);
-    const src_ptr: *D3DTexture = instance.textures.get(src_idx) orelse return;
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
+    const dst_ptr: *D3DBuffer = @ptrCast(@alignCast(dst));
+    const src_ptr: *D3DTexture = @ptrCast(@alignCast(src));
 
     const src_region = src_region_opt orelse .{};
 
@@ -1773,21 +1618,17 @@ pub fn copyTextureToBuffer(
     );
 }
 
-pub fn beginRendering(cmd: gpu.CommandBuffer, attachments: gpu.Attachments) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
+pub fn beginRendering(cmd: *gpu.CommandBuffer, attachments: gpu.Attachments) void {
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
 
-    for (attachments.colors, 0..) |color, i| {
-        const resource_idx: usize = @intFromEnum(color);
-        const resource_ptr: *D3DResource = instance.resources.get(resource_idx) orelse return;
+    for (attachments.attachments, 0..) |color, i| {
+        const resource_ptr: *D3DResource = @ptrCast(@alignCast(color));
         cmd_ptr.render_targets[i] = resource_ptr.cpu_descriptor;
     }
-    cmd_ptr.render_target_num = @intCast(attachments.colors.len);
+    cmd_ptr.render_target_num = @intCast(attachments.attachments.len);
 
-    cmd_ptr.depth_stencil = if (attachments.depth_stencil != .null) ds: {
-        const resource_idx: usize = @intFromEnum(attachments.depth_stencil);
-        const resource_ptr: *D3DResource = instance.resources.get(resource_idx) orelse return;
+    cmd_ptr.depth_stencil = if (attachments.depth_stencil) |ds| ds: {
+        const resource_ptr: *D3DResource = @ptrCast(@alignCast(ds));
         break :ds resource_ptr.cpu_descriptor;
     } else .{ .ptr = 0 };
 
@@ -1799,10 +1640,8 @@ pub fn beginRendering(cmd: gpu.CommandBuffer, attachments: gpu.Attachments) void
     );
 }
 
-pub fn endRendering(cmd: gpu.CommandBuffer) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
+pub fn endRendering(cmd: *gpu.CommandBuffer) void {
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
 
     cmd_ptr.render_target_num = 0;
     cmd_ptr.depth_stencil = .{ .ptr = 0 };
@@ -1815,15 +1654,12 @@ pub fn endRendering(cmd: gpu.CommandBuffer) void {
 }
 
 pub fn ensureTextureState(
-    cmd: gpu.CommandBuffer,
-    texture: gpu.Texture,
+    cmd: *gpu.CommandBuffer,
+    texture: *gpu.Texture,
     state: gpu.TextureState,
 ) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
-    const texture_idx: usize = @intFromEnum(texture);
-    const texture_ptr: *D3DTexture = instance.textures.get(texture_idx) orelse return;
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
+    const texture_ptr: *D3DTexture = @ptrCast(@alignCast(texture));
 
     const d3d_state = conv.textureStateTo(state);
     if (texture_ptr.state == d3d_state) {
@@ -1845,15 +1681,12 @@ pub fn ensureTextureState(
 }
 
 pub fn ensureBufferState(
-    cmd: gpu.CommandBuffer,
-    buffer: gpu.Buffer,
+    cmd: *gpu.CommandBuffer,
+    buffer: *gpu.Buffer,
     state: gpu.BufferState,
 ) void {
-    const instance = getInstance() catch return;
-    const cmd_idx: usize = @intFromEnum(cmd);
-    const cmd_ptr: *D3DCommandBuffer = instance.command_buffers.get(cmd_idx) orelse return;
-    const buffer_idx: usize = @intFromEnum(buffer);
-    const buffer_ptr: *D3DBuffer = instance.buffers.get(buffer_idx) orelse return;
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
+    const buffer_ptr: *D3DBuffer = @ptrCast(@alignCast(buffer));
 
     const d3d_state = conv.bufferStateTo(state);
     if (buffer_ptr.state == d3d_state) {
@@ -1875,13 +1708,15 @@ pub fn ensureBufferState(
 }
 
 const D3DFence = struct {
+    allocator: std.mem.Allocator,
     d3d_fence: *d3d12.IFence,
     value: u64,
     event: windows.HANDLE,
 };
-pub fn initFence() !gpu.Fence {
+pub fn initFence(allocator: std.mem.Allocator) !*gpu.Fence {
     const instance = try getInstance();
-    const fence_idx, const fence_ptr = try instance.fences.alloc();
+    const fence_ptr = try allocator.create(D3DFence);
+    fence_ptr.allocator = allocator;
 
     const hr_createfence = instance.device.CreateFence(
         0,
@@ -1897,24 +1732,20 @@ pub fn initFence() !gpu.Fence {
     fence_ptr.event = windows.CreateEventExA(null, "Fence Event", 0, windows.EVENT_ALL_ACCESS) orelse
         return error.D3D12InternalError;
 
-    return @enumFromInt(fence_idx);
+    return @ptrCast(fence_ptr);
 }
 
-pub fn deinitFence(fence: gpu.Fence) void {
-    const instance = getInstance() catch return;
-    const fence_idx: usize = @intFromEnum(fence);
-    const fence_ptr: *D3DFence = instance.fences.get(fence_idx) orelse return;
+pub fn deinitFence(fence: *gpu.Fence) void {
+    const fence_ptr: *D3DFence = @ptrCast(@alignCast(fence));
 
     _ = fence_ptr.d3d_fence.Release();
     _ = windows.CloseHandle(fence_ptr.event);
 
-    instance.fences.free(fence_idx);
+    fence_ptr.allocator.destroy(fence_ptr);
 }
 
-pub fn waitFenceBlocking(fence: gpu.Fence, value: u64) gpu.Error!void {
-    const instance = try getInstance();
-    const fence_idx: usize = @intFromEnum(fence);
-    const fence_ptr: *D3DFence = instance.fences.get(fence_idx) orelse return error.InvalidFence;
+pub fn waitFenceBlocking(fence: *gpu.Fence, value: u64) gpu.Error!void {
+    const fence_ptr: *D3DFence = @ptrCast(@alignCast(fence));
 
     if (fence_ptr.d3d_fence.GetCompletedValue() >= value) {
         return;
@@ -1933,16 +1764,19 @@ pub fn waitFenceBlocking(fence: gpu.Fence, value: u64) gpu.Error!void {
 }
 
 const D3DBuffer = struct {
+    allocator: std.mem.Allocator,
+
     resource: *d3d12.IResource,
     allocation: *d3d12ma.Allocation,
     state: d3d12.RESOURCE_STATES,
     desc: gpu.BufferDesc,
     is_mapped: bool,
 };
-pub fn initBuffer(desc: gpu.BufferDesc) gpu.Error!gpu.Buffer {
+pub fn initBuffer(allocator: std.mem.Allocator, desc: gpu.BufferDesc) gpu.Error!*gpu.Buffer {
     const instance = try getInstance();
 
-    const buffer_idx, const buffer_ptr = try instance.buffers.alloc();
+    const buffer_ptr = try allocator.create(D3DBuffer);
+    buffer_ptr.allocator = allocator;
     buffer_ptr.desc = desc;
     buffer_ptr.is_mapped = false;
 
@@ -1995,30 +1829,26 @@ pub fn initBuffer(desc: gpu.BufferDesc) gpu.Error!gpu.Buffer {
         return error.D3D12InternalError;
     }
 
-    instance.setDebugName(@ptrCast(buffer_ptr.resource), desc.name);
+    setDebugName(@ptrCast(buffer_ptr.resource), desc.name);
 
-    return @enumFromInt(buffer_idx);
+    return @ptrCast(buffer_ptr);
 }
 
-pub fn deinitBuffer(buffer: gpu.Buffer) void {
-    const instance = getInstance() catch return;
-    const buffer_idx: usize = @intFromEnum(buffer);
-    const buffer_ptr = instance.buffers.get(buffer_idx) orelse return;
+pub fn deinitBuffer(buffer: *gpu.Buffer) void {
+    const buffer_ptr: *D3DBuffer = @ptrCast(@alignCast(buffer));
 
     _ = buffer_ptr.resource.Release();
     buffer_ptr.allocation.Release();
 
-    instance.buffers.free(buffer_idx);
+    buffer_ptr.allocator.destroy(buffer_ptr);
 }
 
 pub fn mapBuffer(
-    buffer: gpu.Buffer,
+    buffer: *gpu.Buffer,
     offset: u64,
     size: u64,
 ) ![]u8 {
-    const instance = try getInstance();
-    const buffer_idx: usize = @intFromEnum(buffer);
-    const buffer_ptr = instance.buffers.get(buffer_idx) orelse return error.InvalidBuffer;
+    const buffer_ptr: *D3DBuffer = @ptrCast(@alignCast(buffer));
 
     if (buffer_ptr.is_mapped) {
         return error.BufferAlreadyMapped;
@@ -2041,26 +1871,26 @@ pub fn mapBuffer(
     return ptr_data.?[offset..][0..real_size];
 }
 
-pub fn unmapBuffer(buffer: gpu.Buffer) void {
-    const instance = getInstance() catch return;
-    const buffer_idx: usize = @intFromEnum(buffer);
-    const buffer_ptr = instance.buffers.get(buffer_idx) orelse return;
+pub fn unmapBuffer(buffer: *gpu.Buffer) void {
+    const buffer_ptr: *D3DBuffer = @ptrCast(@alignCast(buffer));
     defer buffer_ptr.is_mapped = false;
 
     buffer_ptr.resource.Unmap(0, null);
 }
 
 const D3DTexture = struct {
+    allocator: ?std.mem.Allocator = null,
     d3d_texture: *d3d12.IResource,
-    allocation: ?*d3d12ma.Allocation,
-    state: d3d12.RESOURCE_STATES,
+    allocation: ?*d3d12ma.Allocation = null,
+    state: d3d12.RESOURCE_STATES = .{},
     desc: gpu.TextureDesc,
 };
-pub fn initTexture(raw_desc: gpu.TextureDesc) gpu.Error!gpu.Texture {
+pub fn initTexture(allocator: std.mem.Allocator, raw_desc: gpu.TextureDesc) gpu.Error!*gpu.Texture {
     const instance = try getInstance();
 
-    const texture_idx, const texture_ptr = try instance.textures.alloc();
+    const texture_ptr = try allocator.create(D3DTexture);
     const desc = raw_desc.fix();
+    texture_ptr.allocator = allocator;
     texture_ptr.desc = desc;
 
     if (desc.width == 0 or desc.height == 0) {
@@ -2141,21 +1971,19 @@ pub fn initTexture(raw_desc: gpu.TextureDesc) gpu.Error!gpu.Texture {
         return error.D3D12InternalError;
     }
 
-    instance.setDebugName(@ptrCast(texture_ptr.d3d_texture), desc.name);
+    setDebugName(@ptrCast(texture_ptr.d3d_texture), desc.name);
 
-    return @enumFromInt(texture_idx);
+    return @ptrCast(texture_ptr);
 }
 
-pub fn deinitTexture(texture: gpu.Texture) void {
-    const instance = getInstance() catch return;
-    const texture_idx: usize = @intFromEnum(texture);
-    const texture_ptr = instance.textures.get(texture_idx) orelse return;
+pub fn deinitTexture(texture: *gpu.Texture) void {
+    const texture_ptr: *D3DTexture = @ptrCast(@alignCast(texture));
 
     _ = texture_ptr.d3d_texture.Release();
     if (texture_ptr.allocation) |a|
         a.Release();
 
-    instance.textures.free(texture_idx);
+    if (texture_ptr.allocator) |allocator| allocator.destroy(texture_ptr);
 }
 
 fn textureDescFromResource(resource: *d3d12.IResource) gpu.TextureDesc {
@@ -2203,19 +2031,9 @@ fn textureBarrier(
     };
 }
 
-fn textureFromResource(resource: *d3d12.IResource) !gpu.Texture {
-    const instance = try getInstance();
-    const texture_idx, const texture_ptr = try instance.textures.alloc();
-
-    texture_ptr.d3d_texture = resource;
-    texture_ptr.allocation = null;
-    texture_ptr.state = .{};
-    texture_ptr.desc = textureDescFromResource(resource);
-
-    return @enumFromInt(texture_idx);
-}
-
 const D3DPipelineLayout = struct {
+    allocator: std.mem.Allocator,
+
     d3d_root_signature: *d3d12.IRootSignature,
     d3d_indirect_signature: *d3d12.ICommandSignature,
     d3d_indirect_indexed_signature: *d3d12.ICommandSignature,
@@ -2296,9 +2114,10 @@ fn createCommandSignature(
 }
 const IID_ICommandSignature = windows.GUID.parse("{c36a797c-ec80-4f0a-8985-a7b2475082d1}");
 
-pub fn initPipelineLayout(desc: gpu.PipelineLayoutDesc) gpu.Error!gpu.PipelineLayout {
+pub fn initPipelineLayout(allocator: std.mem.Allocator, desc: gpu.PipelineLayoutDesc) gpu.Error!*gpu.PipelineLayout {
     const instance = try getInstance();
-    const pipeline_layout_idx, const pipeline_layout_ptr = try instance.pipeline_layouts.alloc();
+    const pipeline_layout_ptr = try allocator.create(D3DPipelineLayout);
+    pipeline_layout_ptr.allocator = allocator;
     pipeline_layout_ptr.desc = desc;
     pipeline_layout_ptr.root_param_num = 0;
     pipeline_layout_ptr.range_num = 0;
@@ -2421,7 +2240,7 @@ pub fn initPipelineLayout(desc: gpu.PipelineLayoutDesc) gpu.Error!gpu.PipelineLa
         return error.D3D12InternalError;
     }
 
-    instance.setDebugName(@ptrCast(pipeline_layout_ptr.d3d_root_signature), desc.name);
+    setDebugName(@ptrCast(pipeline_layout_ptr.d3d_root_signature), desc.name);
 
     pipeline_layout_ptr.d3d_indirect_signature = try createCommandSignature(
         @ptrCast(instance.device),
@@ -2471,22 +2290,22 @@ pub fn initPipelineLayout(desc: gpu.PipelineLayoutDesc) gpu.Error!gpu.PipelineLa
         }
     }
 
-    return @enumFromInt(pipeline_layout_idx);
+    return @ptrCast(pipeline_layout_ptr);
 }
 
-pub fn deinitPipelineLayout(pipeline_layout: gpu.PipelineLayout) void {
-    const instance = getInstance() catch return;
-    const pipeline_layout_idx: usize = @intFromEnum(pipeline_layout);
-    const pipeline_layout_ptr: *D3DPipelineLayout = instance.pipeline_layouts.get(pipeline_layout_idx) orelse return;
+pub fn deinitPipelineLayout(pipeline_layout: *gpu.PipelineLayout) void {
+    const pipeline_layout_ptr: *D3DPipelineLayout = @ptrCast(@alignCast(pipeline_layout));
 
     _ = pipeline_layout_ptr.d3d_indirect_signature.Release();
     _ = pipeline_layout_ptr.d3d_indirect_indexed_signature.Release();
 
     _ = pipeline_layout_ptr.d3d_root_signature.Release();
-    instance.pipeline_layouts.free(pipeline_layout_idx);
+    pipeline_layout_ptr.allocator.destroy(pipeline_layout_ptr);
 }
 
 const D3DPipeline = struct {
+    allocator: std.mem.Allocator,
+
     layout: *D3DPipelineLayout,
     pipeline: *d3d12.IPipelineState,
     ia_strides: [gpu.MAX_VERTEX_BUFFERS]u32,
@@ -2498,21 +2317,23 @@ const D3DPipeline = struct {
 };
 
 pub fn initGraphicsPipeline(
+    allocator: std.mem.Allocator,
     desc: gpu.GraphicsPipelineDesc,
-) gpu.Error!gpu.Pipeline {
+) gpu.Error!*gpu.Pipeline {
     const instance = try getInstance();
 
-    const pipeline_layout_idx: usize = @intFromEnum(desc.layout);
-    const pipeline_layout_ptr: *D3DPipelineLayout = instance.pipeline_layouts.get(pipeline_layout_idx) orelse return error.InvalidPipelineLayout;
+    const pipeline_layout_ptr: *D3DPipelineLayout = @ptrCast(@alignCast(desc.layout));
 
-    const pipeline_idx, const pipeline_ptr = try instance.pipelines.alloc();
+    const pipeline_ptr = try allocator.create(D3DPipeline);
+    pipeline_ptr.allocator = allocator;
     pipeline_ptr.layout = pipeline_layout_ptr;
     pipeline_ptr.desc = .{ .graphics = desc };
 
     var pso_desc: d3d12.GRAPHICS_PIPELINE_STATE_DESC = .{};
     pso_desc.pRootSignature = pipeline_layout_ptr.d3d_root_signature;
 
-    for (desc.shaders[0..desc.shader_num]) |shader| {
+    var it = desc.shaders.iterator();
+    while (it.next(.{ .target = .dxil })) |shader| {
         switch (shader.stage) {
             .vertex => {
                 pso_desc.VS = .init(shader.bytecode);
@@ -2623,7 +2444,7 @@ pub fn initGraphicsPipeline(
     pso_desc.BlendState.AlphaToCoverageEnable = @intFromBool(desc.multisample.enabled and desc.multisample.alpha_to_coverage);
     pso_desc.BlendState.IndependentBlendEnable = windows.TRUE;
 
-    for (desc.output_merger.colors, pso_desc.BlendState.RenderTarget[0..desc.output_merger.colors.len]) |color, *target| {
+    for (desc.output_merger.attachments, pso_desc.BlendState.RenderTarget[0..desc.output_merger.attachments.len]) |color, *target| {
         target.BlendEnable = @intFromBool(color.blend_enabled);
         target.RenderTargetWriteMask = .{
             .RED = color.write_mask.red,
@@ -2645,8 +2466,8 @@ pub fn initGraphicsPipeline(
         }
     }
 
-    pso_desc.NumRenderTargets = @intCast(desc.output_merger.colors.len);
-    for (desc.output_merger.colors, pso_desc.RTVFormats[0..desc.output_merger.colors.len]) |color, *format| {
+    pso_desc.NumRenderTargets = @intCast(desc.output_merger.attachments.len);
+    for (desc.output_merger.attachments, pso_desc.RTVFormats[0..desc.output_merger.attachments.len]) |color, *format| {
         format.* = conv.formatTo(color.format);
     }
 
@@ -2660,37 +2481,75 @@ pub fn initGraphicsPipeline(
         return error.D3D12InternalError;
     }
 
-    return @enumFromInt(pipeline_idx);
+    return @ptrCast(pipeline_ptr);
 }
 
-pub fn deinitPipeline(pipeline: gpu.Pipeline) void {
-    const instance = getInstance() catch return;
-    const pipeline_idx: usize = @intFromEnum(pipeline);
-    const pipeline_ptr: *D3DPipeline = instance.pipelines.get(pipeline_idx) orelse return;
+pub fn initComputePipeline(
+    allocator: std.mem.Allocator,
+    desc: gpu.ComputePipelineDesc,
+) gpu.Error!*gpu.Pipeline {
+    const instance = try getInstance();
+
+    const pipeline_layout_ptr: *D3DPipelineLayout = @ptrCast(@alignCast(desc.layout));
+
+    const pipeline_ptr = try allocator.create(D3DPipeline);
+    pipeline_ptr.allocator = allocator;
+    pipeline_ptr.layout = pipeline_layout_ptr;
+    pipeline_ptr.desc = .{ .compute = desc };
+
+    var pso_desc: d3d12.COMPUTE_PIPELINE_STATE_DESC = .{
+        .pRootSignature = pipeline_layout_ptr.d3d_root_signature,
+        .NodeMask = 0,
+        .Flags = d3d12.PIPELINE_STATE_FLAG_NONE,
+    };
+
+    var it = desc.shaders.iterator();
+    while (it.next(.{ .target = .dxil, .stage = .compute })) |shader| {
+        pso_desc.CS = .init(shader.bytecode);
+    }
+
+    const hr_create_pso = instance.device.CreateComputePipelineState(
+        &pso_desc,
+        &d3d12.IID_IPipelineState,
+        @ptrCast(&pipeline_ptr.pipeline),
+    );
+    if (hr_create_pso != windows.S_OK) {
+        log.err("CreateComputePipelineState failed: {}", .{hr_create_pso});
+        return error.D3D12InternalError;
+    }
+
+    return @ptrCast(pipeline_ptr);
+}
+
+pub fn deinitPipeline(pipeline: *gpu.Pipeline) void {
+    const pipeline_ptr: *D3DPipeline = @ptrCast(@alignCast(pipeline));
 
     _ = pipeline_ptr.pipeline.Release();
-    instance.pipelines.free(pipeline_idx);
+
+    pipeline_ptr.allocator.destroy(pipeline_ptr);
 }
 
 const D3DSwapchain = struct {
+    allocator: std.mem.Allocator,
+
     d3d_swapchain: *dxgi.ISwapChain3,
     d3d_queue: *d3d12.ICommandQueue,
     create_flags: dxgi.SWAP_CHAIN_FLAG,
     desc: gpu.SwapchainDesc,
     sync_interval: u32,
     present_flags: dxgi.PRESENT_FLAG,
-    textures: [gpu.MAX_SWAPCHAIN_IMAGES]gpu.Texture,
+    textures: [gpu.MAX_SWAPCHAIN_IMAGES]?D3DTexture,
 };
-pub fn initSwapchain(desc: gpu.SwapchainDesc) gpu.Error!gpu.Swapchain {
+pub fn initSwapchain(allocator: std.mem.Allocator, desc: gpu.SwapchainDesc) gpu.Error!*gpu.Swapchain {
     const instance = try getInstance();
 
-    const idx_queue: usize = @intFromEnum(desc.queue);
-    const queue_ptr: *D3DCommandQueue = instance.command_queues.get(idx_queue) orelse return error.InvalidCommandQueue;
+    const queue_ptr: *D3DCommandQueue = @ptrCast(@alignCast(desc.queue));
 
     if (desc.texture_num == 0) return error.SwapchainTooFewImages;
     if (desc.texture_num > gpu.MAX_SWAPCHAIN_IMAGES) return error.SwapchainTooManyImages;
 
-    const swapchain_idx, const swapchain_ptr = try instance.swapchains.alloc();
+    const swapchain_ptr = try allocator.create(D3DSwapchain);
+    swapchain_ptr.allocator = allocator;
     swapchain_ptr.desc = desc;
 
     var tearing_support_winbool: windows.BOOL = 0;
@@ -2729,7 +2588,7 @@ pub fn initSwapchain(desc: gpu.SwapchainDesc) gpu.Error!gpu.Swapchain {
     swapchain_ptr.create_flags = swapchain_desc.Flags;
 
     for (&swapchain_ptr.textures) |*tex| {
-        tex.* = .null;
+        tex.* = null;
     }
 
     const create_swapchain_for_hwnd_ptr: *const fn (
@@ -2763,28 +2622,23 @@ pub fn initSwapchain(desc: gpu.SwapchainDesc) gpu.Error!gpu.Swapchain {
         return error.D3D12InternalError;
     }
 
-    instance.setDebugName(@ptrCast(swapchain_ptr.d3d_swapchain), desc.name);
+    setDebugName(@ptrCast(swapchain_ptr.d3d_swapchain), desc.name);
 
-    try acquireSwapchainTextures(@enumFromInt(swapchain_idx));
+    try acquireSwapchainTextures(@ptrCast(swapchain_ptr));
 
-    return @enumFromInt(swapchain_idx);
+    return @ptrCast(swapchain_ptr);
 }
 
-pub fn deinitSwapchain(swapchain: gpu.Swapchain) void {
-    const instance = getInstance() catch return;
-    const swapchain_idx: usize = @intFromEnum(swapchain);
-    const swapchain_ptr = instance.swapchains.get(swapchain_idx) orelse return;
+pub fn deinitSwapchain(swapchain: *gpu.Swapchain) void {
+    const swapchain_ptr: *D3DSwapchain = @ptrCast(@alignCast(swapchain));
 
     releaseSwapchainTextures(swapchain);
     _ = swapchain_ptr.d3d_swapchain.Release();
-
-    instance.swapchains.free(swapchain_idx);
+    swapchain_ptr.allocator.destroy(swapchain_ptr);
 }
 
-pub fn resizeSwapchain(swapchain: gpu.Swapchain, size: gpu.Vec2u) gpu.Error!void {
-    const instance = try getInstance();
-    const swapchain_idx: usize = @intFromEnum(swapchain);
-    const swapchain_ptr: *D3DSwapchain = instance.swapchains.get(swapchain_idx) orelse return error.InvalidSwapchain;
+pub fn resizeSwapchain(swapchain: *gpu.Swapchain, size: gpu.Vec2u) gpu.Error!void {
+    const swapchain_ptr: *D3DSwapchain = @ptrCast(@alignCast(swapchain));
 
     releaseSwapchainTextures(swapchain);
 
@@ -2801,13 +2655,11 @@ pub fn resizeSwapchain(swapchain: gpu.Swapchain, size: gpu.Vec2u) gpu.Error!void
     }
     swapchain_ptr.desc.size = size;
 
-    return acquireSwapchainTextures(swapchain);
+    try acquireSwapchainTextures(swapchain);
 }
 
-pub fn acquireNextSwapchainTexture(swapchain: gpu.Swapchain) !u32 {
-    const instance = try getInstance();
-    const swapchain_idx: usize = @intFromEnum(swapchain);
-    const swapchain_ptr: *D3DSwapchain = instance.swapchains.get(swapchain_idx) orelse return error.InvalidSwapchain;
+pub fn acquireNextSwapchainTexture(swapchain: *gpu.Swapchain) !u32 {
+    const swapchain_ptr: *D3DSwapchain = @ptrCast(@alignCast(swapchain));
 
     const texture_idx = swapchain_ptr.d3d_swapchain.GetCurrentBackBufferIndex();
     return texture_idx;
@@ -2816,35 +2668,29 @@ pub fn acquireNextSwapchainTexture(swapchain: gpu.Swapchain) !u32 {
 /// memory is owned by the swapchain
 ///
 /// do not store result
-pub fn getSwapchainTextures(swapchain: gpu.Swapchain) ![]const gpu.Texture {
-    const instance = try getInstance();
-    const swapchain_idx: usize = @intFromEnum(swapchain);
-    const swapchain_ptr: *D3DSwapchain = instance.swapchains.get(swapchain_idx) orelse return error.InvalidSwapchain;
-
-    return &swapchain_ptr.textures;
+pub fn getSwapchainTexture(swapchain: *gpu.Swapchain, index: usize) !?*gpu.Texture {
+    const swapchain_ptr: *D3DSwapchain = @ptrCast(@alignCast(swapchain));
+    if (index >= swapchain_ptr.desc.texture_num) {
+        return null;
+    }
+    return @ptrCast(&swapchain_ptr.textures[index].?);
 }
 
-pub fn presentSwapchain(swapchain: gpu.Swapchain) gpu.Error!void {
-    const instance = try getInstance();
-    const swapchain_idx: usize = @intFromEnum(swapchain);
-    const swapchain_ptr: *D3DSwapchain = instance.swapchains.get(swapchain_idx) orelse return error.InvalidSwapchain;
+pub fn presentSwapchain(swapchain: *gpu.Swapchain) gpu.Error!void {
+    const swapchain_ptr: *D3DSwapchain = @ptrCast(@alignCast(swapchain));
 
     const hr_present = swapchain_ptr.d3d_swapchain.Present(swapchain_ptr.sync_interval, swapchain_ptr.present_flags);
     if (hr_present != windows.S_OK) {
         return error.D3D12InternalError;
     }
-
-    return;
 }
 
-fn acquireSwapchainTextures(swapchain: gpu.Swapchain) !void {
-    const instance = try getInstance();
-    const swapchain_idx: usize = @intFromEnum(swapchain);
-    const swapchain_ptr: *D3DSwapchain = instance.swapchains.get(swapchain_idx) orelse return error.InvalidSwapchain;
+fn acquireSwapchainTextures(swapchain: *gpu.Swapchain) !void {
+    const swapchain_ptr: *D3DSwapchain = @ptrCast(@alignCast(swapchain));
 
     for (&swapchain_ptr.textures, 0..) |*tex, texture_index| {
         if (texture_index >= swapchain_ptr.desc.texture_num) {
-            tex.* = .null;
+            tex.* = null;
             continue;
         }
 
@@ -2858,26 +2704,29 @@ fn acquireSwapchainTextures(swapchain: gpu.Swapchain) !void {
             return error.D3D12InternalError;
         }
 
-        tex.* = try textureFromResource(resource.?);
+        tex.* = .{
+            .d3d_texture = resource.?,
+            .allocation = null,
+            .state = .{},
+            .desc = textureDescFromResource(resource.?),
+        };
     }
 
     return;
 }
 
-fn releaseSwapchainTextures(swapchain: gpu.Swapchain) void {
-    const instance = getInstance() catch return;
-    const swapchain_idx: usize = @intFromEnum(swapchain);
-    const swapchain_ptr: *D3DSwapchain = instance.swapchains.get(swapchain_idx) orelse return;
+fn releaseSwapchainTextures(swapchain: *gpu.Swapchain) void {
+    const swapchain_ptr: *D3DSwapchain = @ptrCast(@alignCast(swapchain));
 
     for (&swapchain_ptr.textures) |*tex| {
-        if (tex.* != .null) {
-            deinitTexture(tex.*);
+        if (tex.*) |*tex_ptr| {
+            deinitTexture(@ptrCast(tex_ptr));
         }
-        tex.* = .null;
+        tex.* = null;
     }
 }
 
-fn setDebugName(_: *@This(), object: *d3d12.IObject, name: []const u8) void {
+fn setDebugName(object: *d3d12.IObject, name: []const u8) void {
     if (@import("builtin").mode != .Debug) {
         return;
     }
@@ -3102,7 +2951,6 @@ fn getTextureSubResourceIndex(
 
 const log = std.log.scoped(.@"gpu d3d12");
 
-const util = @import("util.zig");
 const d3d12ma = @import("d3d12ma.zig");
 
 const zwindows = @import("zwindows");
