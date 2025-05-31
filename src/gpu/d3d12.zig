@@ -216,6 +216,7 @@ pub fn getLimits() gpu.Limits {
 
 const D3DDescriptor = struct {
     heap_type: d3d12.DESCRIPTOR_HEAP_TYPE,
+    range_type: d3d12.DESCRIPTOR_RANGE_TYPE,
     range: RangeAllocator.Range,
 };
 
@@ -262,10 +263,11 @@ const D3DDescriptorHeap = struct {
         _ = self.d3d_heap.Release();
     }
 
-    pub fn alloc(self: *D3DDescriptorHeap, count: u32) !D3DDescriptor {
+    pub fn alloc(self: *D3DDescriptorHeap, tag_range_type: d3d12.DESCRIPTOR_RANGE_TYPE, count: u32) !D3DDescriptor {
         const range = try self.range_allocator.allocate(count);
         return .{
             .heap_type = self.heap_type,
+            .range_type = tag_range_type,
             .range = range,
         };
     }
@@ -276,10 +278,10 @@ const D3DDescriptorHeap = struct {
     }
 };
 
-fn allocateStagingHeapDescriptor(ty: d3d12.DESCRIPTOR_HEAP_TYPE) !D3DDescriptor {
+fn allocateStagingHeapDescriptor(ty: d3d12.DESCRIPTOR_HEAP_TYPE, range_type: d3d12.DESCRIPTOR_RANGE_TYPE) !D3DDescriptor {
     const instance = try getInstance();
     const heap = &instance.staging_heaps[@intFromEnum(ty)];
-    return try heap.alloc(1);
+    return try heap.alloc(range_type, 1);
 }
 
 fn freeStagingHeapDescriptor(desc: D3DDescriptor) void {
@@ -296,10 +298,10 @@ fn getStagingHeapCpuPointer(handle: D3DDescriptor) d3d12.CPU_DESCRIPTOR_HANDLE {
     };
 }
 
-fn allocateGpuHeapDescriptor(ty: d3d12.DESCRIPTOR_HEAP_TYPE, count: u32) !D3DDescriptor {
+fn allocateGpuHeapDescriptor(ty: d3d12.DESCRIPTOR_HEAP_TYPE, range_type: d3d12.DESCRIPTOR_RANGE_TYPE, count: u32) !D3DDescriptor {
     const instance = try getInstance();
     const heap = &instance.gpu_heaps[@intFromEnum(ty)];
-    return try heap.alloc(count);
+    return try heap.alloc(range_type, count);
 }
 
 fn freeGpuHeapDescriptor(desc: D3DDescriptor) void {
@@ -351,7 +353,7 @@ const D3DResource = struct {
         resource: *D3DResource,
         desc: d3d12.SHADER_RESOURCE_VIEW_DESC,
     ) gpu.Error!void {
-        resource.cpu_handle = try allocateStagingHeapDescriptor(.CBV_SRV_UAV);
+        resource.cpu_handle = try allocateStagingHeapDescriptor(.CBV_SRV_UAV, .SRV);
         resource.cpu_descriptor = getStagingHeapCpuPointer(resource.cpu_handle);
         resource.binding_type = .srv;
         const instance = try getInstance();
@@ -363,7 +365,7 @@ const D3DResource = struct {
         is_integer: bool,
         desc: d3d12.UNORDERED_ACCESS_VIEW_DESC,
     ) gpu.Error!void {
-        resource.cpu_handle = try allocateStagingHeapDescriptor(.CBV_SRV_UAV);
+        resource.cpu_handle = try allocateStagingHeapDescriptor(.CBV_SRV_UAV, .UAV);
         resource.cpu_descriptor = getStagingHeapCpuPointer(resource.cpu_handle);
         resource.integer_format = is_integer;
         resource.binding_type = .uav;
@@ -375,7 +377,8 @@ const D3DResource = struct {
         resource: *D3DResource,
         desc: d3d12.RENDER_TARGET_VIEW_DESC,
     ) gpu.Error!void {
-        resource.cpu_handle = try allocateStagingHeapDescriptor(.RTV);
+        // 2nd param wont be used for staging so put something random
+        resource.cpu_handle = try allocateStagingHeapDescriptor(.RTV, .SRV);
         resource.cpu_descriptor = getStagingHeapCpuPointer(resource.cpu_handle);
         resource.binding_type = .rtv;
         const instance = try getInstance();
@@ -386,7 +389,8 @@ const D3DResource = struct {
         resource: *D3DResource,
         desc: d3d12.DEPTH_STENCIL_VIEW_DESC,
     ) gpu.Error!void {
-        resource.cpu_handle = try allocateStagingHeapDescriptor(.DSV);
+        // 2nd param wont be used for staging so put something random
+        resource.cpu_handle = try allocateStagingHeapDescriptor(.DSV, .SRV);
         resource.cpu_descriptor = getStagingHeapCpuPointer(resource.cpu_handle);
         resource.binding_type = .dsv;
         const instance = try getInstance();
@@ -397,7 +401,7 @@ const D3DResource = struct {
         resource: *D3DResource,
         desc: d3d12.CONSTANT_BUFFER_VIEW_DESC,
     ) gpu.Error!void {
-        resource.cpu_handle = try allocateStagingHeapDescriptor(.CBV_SRV_UAV);
+        resource.cpu_handle = try allocateStagingHeapDescriptor(.CBV_SRV_UAV, .CBV);
         resource.cpu_descriptor = getStagingHeapCpuPointer(resource.cpu_handle);
         resource.binding_type = .cbv;
         const instance = try getInstance();
@@ -596,7 +600,7 @@ pub fn initSampler(allocator: std.mem.Allocator, desc: gpu.SamplerDesc) gpu.Erro
 
     const resource_ptr = try allocator.create(D3DResource);
     resource_ptr.allocator = allocator;
-    resource_ptr.cpu_handle = try allocateStagingHeapDescriptor(.SAMPLER);
+    resource_ptr.cpu_handle = try allocateStagingHeapDescriptor(.SAMPLER, .SAMPLER);
     resource_ptr.cpu_descriptor = getStagingHeapCpuPointer(resource_ptr.cpu_handle);
     resource_ptr.heap_type = .SAMPLER;
 
@@ -652,35 +656,38 @@ pub fn deinitResource(resource: *gpu.Resource) void {
 const D3DResourceSet = struct {
     allocator: std.mem.Allocator,
 
-    bound: std.BoundedArray(D3DDescriptor, gpu.MAX_BINDINGS),
-    is_set: std.BoundedArray(bool, gpu.MAX_BINDINGS),
-    pipeline_layout: *D3DPipelineLayout,
+    bound: std.BoundedArray(D3DDescriptor, gpu.MAX_BINDINGS_PER_SET),
+    is_set: std.BoundedArray(bool, gpu.MAX_BINDINGS_PER_SET),
 };
 
-pub fn initResourceSet(allocator: std.mem.Allocator, pipeline_layout: *gpu.PipelineLayout) gpu.Error!*gpu.ResourceSet {
-    const pipeline_layout_ptr: *D3DPipelineLayout = @ptrCast(@alignCast(pipeline_layout));
-
+pub fn initResourceSet(allocator: std.mem.Allocator, desc: gpu.ResourceSetDesc) gpu.Error!*gpu.ResourceSet {
     const resource_set_ptr = try allocator.create(D3DResourceSet);
     resource_set_ptr.allocator = allocator;
-    resource_set_ptr.pipeline_layout = pipeline_layout_ptr;
     resource_set_ptr.bound = .{};
     resource_set_ptr.is_set = .{};
 
-    for (0..pipeline_layout_ptr.binding_count) |index| {
-        const param = pipeline_layout_ptr.root_params[index];
-        if (param.ParameterType == .DESCRIPTOR_TABLE) {
-            const range = param.u.DescriptorTable.pDescriptorRanges.?[0];
+    for (desc.bindings) |binding| {
+        const range_type: d3d12.DESCRIPTOR_RANGE_TYPE = switch (binding.kind) {
+            .sampler => .SAMPLER,
+            .constant_buffer => .CBV,
+            .srv_texture, .srv_buffer, .srv_structured_buffer => .SRV,
+            .uav_texture, .uav_buffer, .uav_structured_buffer => .UAV,
+        };
+        const is_table = !(binding.resource_num == 1 and range_type != .SAMPLER);
+        if (is_table) {
             const descriptor = try allocateGpuHeapDescriptor(
-                switch (range.RangeType) {
+                switch (range_type) {
                     .SRV, .UAV, .CBV => .CBV_SRV_UAV,
                     .SAMPLER => .SAMPLER,
                 },
-                range.NumDescriptors,
+                range_type,
+                binding.resource_num,
             );
             try resource_set_ptr.bound.append(descriptor);
         } else {
             const descriptor = try allocateGpuHeapDescriptor(
                 .CBV_SRV_UAV,
+                range_type,
                 1,
             );
             try resource_set_ptr.bound.append(descriptor);
@@ -721,14 +728,26 @@ pub fn setResource(resource_set: *gpu.ResourceSet, binding: u32, offset: u32, re
         return error.InvalidResource;
     }
 
-    const root_param = resource_set_ptr.pipeline_layout.root_params[binding];
-    if (root_param.ParameterType != .DESCRIPTOR_TABLE) {
+    const count = descriptor.range.size();
+    const is_table = !(count == 1 and
+        descriptor.heap_type != .SAMPLER);
+
+    // const root_param = resource_set_ptr.pipeline_layout.root_params[binding];
+    if (is_table) {
+        if (offset >= count) {
+            return error.InvalidResourceBinding;
+        }
+        const dst = getGpuHeapCpuPointer(descriptor, offset);
+        const src = getStagingHeapCpuPointer(resource_ptr.cpu_handle);
+        instance.device.CopyDescriptorsSimple(1, dst, src, descriptor.heap_type);
+        resource_set_ptr.is_set.buffer[binding] = true;
+    } else {
         const dst = getGpuHeapCpuPointer(descriptor, 0);
         const src = getStagingHeapCpuPointer(resource_ptr.cpu_handle);
         const matches: bool = @reduce(.Or, @Vector(3, bool){
-            root_param.ParameterType == .CBV and resource_ptr.binding_type == .cbv,
-            root_param.ParameterType == .SRV and resource_ptr.binding_type == .srv,
-            root_param.ParameterType == .UAV and resource_ptr.binding_type == .uav,
+            descriptor.range_type == .CBV and resource_ptr.binding_type == .cbv,
+            descriptor.range_type == .SRV and resource_ptr.binding_type == .srv,
+            descriptor.range_type == .UAV and resource_ptr.binding_type == .uav,
         });
         if (matches) {
             instance.device.CopyDescriptorsSimple(1, dst, src, heap_type);
@@ -736,18 +755,6 @@ pub fn setResource(resource_set: *gpu.ResourceSet, binding: u32, offset: u32, re
         } else {
             return error.InvalidResourceBinding;
         }
-    } else {
-        const range = root_param.u.DescriptorTable.pDescriptorRanges.?[0];
-        if (offset >= range.NumDescriptors) {
-            return error.InvalidResourceBinding;
-        }
-        const dst = getGpuHeapCpuPointer(descriptor, offset);
-        const src = getStagingHeapCpuPointer(resource_ptr.cpu_handle);
-        instance.device.CopyDescriptorsSimple(1, dst, src, switch (range.RangeType) {
-            .SRV, .UAV, .CBV => .CBV_SRV_UAV,
-            .SAMPLER => .SAMPLER,
-        });
-        resource_set_ptr.is_set.buffer[binding] = true;
     }
 }
 
@@ -839,8 +846,10 @@ const D3DCommandBuffer = struct {
     pipeline_layout: ?*D3DPipelineLayout,
     pipeline: ?*D3DPipeline,
     primitive_topology: d3d12.PRIMITIVE_TOPOLOGY,
-    resource_set: ?*D3DResourceSet,
+    resource_sets: [gpu.MAX_RESOURCE_SETS]?*D3DResourceSet = empty_resource_sets,
     is_graphics: bool,
+
+    pub const empty_resource_sets: [gpu.MAX_RESOURCE_SETS]?*D3DResourceSet = @splat(null);
 };
 pub fn initCommandBuffer(allocator: std.mem.Allocator, queue: *gpu.CommandQueue) gpu.Error!*gpu.CommandBuffer {
     const instance = try getInstance();
@@ -876,7 +885,7 @@ pub fn initCommandBuffer(allocator: std.mem.Allocator, queue: *gpu.CommandQueue)
     cmd_ptr.render_target_num = 0;
     cmd_ptr.is_graphics = true;
     cmd_ptr.primitive_topology = .TRIANGLELIST;
-    cmd_ptr.resource_set = null;
+    cmd_ptr.resource_sets = D3DCommandBuffer.empty_resource_sets;
     // close before use
     // ignore error here; should not happen
     _ = cmd_ptr.command_list.Close();
@@ -920,7 +929,7 @@ pub fn beginCommandBuffer(cmd: *gpu.CommandBuffer) gpu.Error!void {
     cmd_ptr.render_target_num = 0;
     cmd_ptr.is_graphics = true;
     cmd_ptr.primitive_topology = .TRIANGLELIST;
-    cmd_ptr.resource_set = null;
+    cmd_ptr.resource_sets = D3DCommandBuffer.empty_resource_sets;
 
     return;
 }
@@ -1047,8 +1056,14 @@ pub fn clearBuffer(cmd: *gpu.CommandBuffer, desc: gpu.ClearBufferDesc) void {
 
     const resource_ptr: *D3DResource = @ptrCast(@alignCast(desc.buffer));
 
+    const set = desc.set_index;
+    if (set >= gpu.MAX_RESOURCE_SETS) {
+        log.err("Invalid resource set index: {d}", .{set});
+        return;
+    }
+
     const binding = desc.binding_index;
-    if (binding >= gpu.MAX_BINDINGS) {
+    if (binding >= gpu.MAX_BINDINGS_PER_SET) {
         log.err("Invalid binding index: {d}", .{binding});
         return;
     }
@@ -1215,19 +1230,20 @@ pub fn setPipeline(
 pub fn setResourceSet(
     cmd: *gpu.CommandBuffer,
     resource_set: *gpu.ResourceSet,
+    index: u32,
 ) void {
     const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
     const resource_set_ptr: *D3DResourceSet = @ptrCast(@alignCast(resource_set));
 
-    if (cmd_ptr.pipeline_layout != resource_set_ptr.pipeline_layout) {
-        log.err("Pipeline layout not valid", .{});
+    if (index >= gpu.MAX_RESOURCE_SETS) {
+        log.err("Invalid resource set index: {d}", .{index});
         return;
     }
-
-    cmd_ptr.resource_set = resource_set_ptr;
+    cmd_ptr.resource_sets[index] = resource_set_ptr;
+    const root_param_offset = cmd_ptr.pipeline_layout.?.set_indices[index];
 
     for (resource_set_ptr.bound.constSlice(), 0..) |descriptor, i| {
-        const root_param = cmd_ptr.pipeline_layout.?.root_params[i];
+        const root_param = cmd_ptr.pipeline_layout.?.root_params[root_param_offset + i];
         const gpu_address = if (resource_set_ptr.is_set.get(i)) getGpuHeapGpuPointer(descriptor, 0).ptr else continue;
         if (root_param.ParameterType != .DESCRIPTOR_TABLE) {
             switch (root_param.ParameterType) {
@@ -1682,7 +1698,7 @@ pub fn endRendering(cmd: *gpu.CommandBuffer) void {
     cmd_ptr.render_target_num = 0;
     cmd_ptr.depth_stencil = .{ .ptr = 0 };
     cmd_ptr.render_targets = undefined;
-    cmd_ptr.resource_set = null;
+    cmd_ptr.resource_sets = D3DCommandBuffer.empty_resource_sets;
     cmd_ptr.pipeline = null;
     cmd_ptr.pipeline_layout = null;
     cmd_ptr.primitive_topology = .UNDEFINED;
@@ -2089,6 +2105,9 @@ const D3DPipelineLayout = struct {
     root_params: [64]d3d12.ROOT_PARAMETER1,
     root_param_num: u8,
     binding_count: u32,
+    /// points to the index of the root parameter
+    set_indices: [gpu.MAX_RESOURCE_SETS]usize,
+    set_num: u8,
     constant: ?gpu.Constant,
 
     pub fn addDescriptorRange(self: *@This(), range: d3d12.DESCRIPTOR_RANGE1) usize {
@@ -2106,6 +2125,15 @@ const D3DPipelineLayout = struct {
 
         self.root_params[self.root_param_num] = param;
         return self.root_param_num;
+    }
+
+    // returns the index
+    pub fn addSetIndex(self: *@This()) usize {
+        if (self.set_num == self.set_indices.len) @panic("D3DPipelineLayout: too many resource sets");
+        defer self.set_num += 1;
+
+        self.set_indices[self.set_num] = @intCast(self.root_param_num);
+        return self.set_num;
     }
 
     pub fn rootParams(self: *@This()) []d3d12.ROOT_PARAMETER1 {
@@ -2168,60 +2196,75 @@ pub fn initPipelineLayout(allocator: std.mem.Allocator, desc: gpu.PipelineLayout
     pipeline_layout_ptr.root_param_num = 0;
     pipeline_layout_ptr.range_num = 0;
     pipeline_layout_ptr.binding_count = 0;
+    pipeline_layout_ptr.set_num = 0;
     pipeline_layout_ptr.constant = null;
 
-    const bindings = desc.bindings;
-    pipeline_layout_ptr.binding_count = @intCast(bindings.len);
-    if (bindings.len > gpu.MAX_BINDINGS)
+    const sets = desc.sets;
+    pipeline_layout_ptr.binding_count = 0;
+    for (sets) |set| {
+        if (set.bindings.len > gpu.MAX_BINDINGS_PER_SET) {
+            return error.TooManyResourceBindings;
+        }
+        pipeline_layout_ptr.binding_count += @intCast(set.bindings.len);
+    }
+    if (sets.len > gpu.MAX_RESOURCE_SETS)
         return error.TooManyResourceBindings;
-    for (bindings, 0..) |binding, binding_i| {
-        const range_type: d3d12.DESCRIPTOR_RANGE_TYPE = switch (binding.kind) {
-            .sampler => .SAMPLER,
-            .constant_buffer => .CBV,
-            .srv_texture, .srv_buffer, .srv_structured_buffer => .SRV,
-            .uav_texture, .uav_buffer, .uav_structured_buffer => .UAV,
-        };
-        if (binding.resource_num == 1 and range_type != .SAMPLER) {
-            _ = pipeline_layout_ptr.addRootParam(.{
-                .ParameterType = switch (range_type) {
-                    .SRV => .SRV,
-                    .UAV => .UAV,
-                    .CBV => .CBV,
-                    else => unreachable,
-                },
-                .ShaderVisibility = .ALL,
-                .u = .{ .Descriptor = .{
-                    .ShaderRegister = 0,
-                    .RegisterSpace = @intCast(binding_i),
-                    .Flags = .{},
-                } },
-            });
-        } else {
-            const range_index = pipeline_layout_ptr.addDescriptorRange(.{
-                .RangeType = switch (binding.kind) {
-                    .sampler => .SAMPLER,
-                    .constant_buffer => .CBV,
-                    .srv_texture, .srv_buffer, .srv_structured_buffer => .SRV,
-                    .uav_texture, .uav_buffer, .uav_structured_buffer => .UAV,
-                },
-                .NumDescriptors = binding.resource_num,
-                .BaseShaderRegister = 0,
-                .RegisterSpace = @intCast(binding_i),
-                .OffsetInDescriptorsFromTableStart = d3d12.DESCRIPTOR_RANGE_OFFSET_APPEND,
-                .Flags = .{
-                    .DESCRIPTORS_VOLATILE = binding.resource_num > 1,
-                    .DATA_VOLATILE = binding.resource_num > 1 and binding.kind != .sampler,
-                },
-            });
+    for (sets, 0..) |set, set_i| {
+        _ = pipeline_layout_ptr.addSetIndex();
+        var set_binding_count: u32 = 0;
+        for (set.bindings, 0..) |binding, binding_i| {
+            _ = binding_i;
+            const range_type: d3d12.DESCRIPTOR_RANGE_TYPE = switch (binding.kind) {
+                .sampler => .SAMPLER,
+                .constant_buffer => .CBV,
+                .srv_texture, .srv_buffer, .srv_structured_buffer => .SRV,
+                .uav_texture, .uav_buffer, .uav_structured_buffer => .UAV,
+            };
+            if (binding.resource_num == 1 and range_type != .SAMPLER) {
+                _ = pipeline_layout_ptr.addRootParam(.{
+                    .ParameterType = switch (range_type) {
+                        .SRV => .SRV,
+                        .UAV => .UAV,
+                        .CBV => .CBV,
+                        else => unreachable,
+                    },
+                    .ShaderVisibility = .ALL,
+                    .u = .{ .Descriptor = .{
+                        .ShaderRegister = set_binding_count,
+                        .RegisterSpace = @intCast(set_i),
+                        .Flags = .{},
+                    } },
+                });
+                set_binding_count += 1;
+            } else {
+                const range_index = pipeline_layout_ptr.addDescriptorRange(.{
+                    .RangeType = switch (binding.kind) {
+                        .sampler => .SAMPLER,
+                        .constant_buffer => .CBV,
+                        .srv_texture, .srv_buffer, .srv_structured_buffer => .SRV,
+                        .uav_texture, .uav_buffer, .uav_structured_buffer => .UAV,
+                    },
+                    .NumDescriptors = binding.resource_num,
+                    .BaseShaderRegister = set_binding_count,
+                    .RegisterSpace = @intCast(set_i),
+                    .OffsetInDescriptorsFromTableStart = d3d12.DESCRIPTOR_RANGE_OFFSET_APPEND,
+                    .Flags = .{
+                        .DESCRIPTORS_VOLATILE = binding.resource_num > 1,
+                        .DATA_VOLATILE = binding.resource_num > 1 and binding.kind != .sampler,
+                    },
+                });
 
-            _ = pipeline_layout_ptr.addRootParam(.{
-                .ParameterType = .DESCRIPTOR_TABLE,
-                .ShaderVisibility = .ALL,
-                .u = .{ .DescriptorTable = .{
-                    .NumDescriptorRanges = 1,
-                    .pDescriptorRanges = pipeline_layout_ptr.ranges[range_index..][0..1].ptr,
-                } },
-            });
+                _ = pipeline_layout_ptr.addRootParam(.{
+                    .ParameterType = .DESCRIPTOR_TABLE,
+                    .ShaderVisibility = .ALL,
+                    .u = .{ .DescriptorTable = .{
+                        .NumDescriptorRanges = 1,
+                        .pDescriptorRanges = pipeline_layout_ptr.ranges[range_index..][0..1].ptr,
+                    } },
+                });
+
+                set_binding_count += binding.resource_num;
+            }
         }
     }
 
@@ -2246,7 +2289,7 @@ pub fn initPipelineLayout(allocator: std.mem.Allocator, desc: gpu.PipelineLayout
             .u = .{
                 .Constants = .{
                     .ShaderRegister = 0,
-                    .RegisterSpace = gpu.MAX_BINDINGS,
+                    .RegisterSpace = gpu.MAX_RESOURCE_SETS,
                     .Num32BitValues = @divFloor(constant.size, 4) + @as(u32, if (@mod(constant.size, 4) == 0) 0 else 1),
                 },
             },
@@ -2294,7 +2337,7 @@ pub fn initPipelineLayout(allocator: std.mem.Allocator, desc: gpu.PipelineLayout
         pipeline_layout_ptr.d3d_root_signature,
         @sizeOf(gpu.DrawEmulated),
         true,
-        @intCast(bindings.len),
+        @intCast(pipeline_layout_ptr.binding_count),
     );
     pipeline_layout_ptr.d3d_indirect_indexed_signature = try createCommandSignature(
         @ptrCast(instance.device),
@@ -2302,7 +2345,7 @@ pub fn initPipelineLayout(allocator: std.mem.Allocator, desc: gpu.PipelineLayout
         pipeline_layout_ptr.d3d_root_signature,
         @sizeOf(gpu.DrawIndexedEmulated),
         true,
-        @intCast(bindings.len),
+        @intCast(pipeline_layout_ptr.binding_count),
     );
 
     // print root signature

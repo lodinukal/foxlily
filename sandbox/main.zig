@@ -25,7 +25,7 @@ const App = struct {
     accumulated_time: i128 = 0,
 };
 const AppError = sdl.SDLAppError || ila.gpu.Error || ila.Window.Error || error{OutOfMemory} ||
-    error{ InvalidImageFormat, ImageInitFailed } || error{TransferNotInProgress};
+    error{ InvalidImageFormat, ImageInitFailed } || error{TransferNotInProgress} || error{PathTooLong};
 
 pub const main = sdl.main;
 pub const std_options = sdl.std_options;
@@ -131,7 +131,7 @@ pub fn tick(app: *App) AppError!void {
         cmd.setPipelineLayout(app.resources.pipeline_layout);
         cmd.setPipeline(app.resources.pipeline);
         cmd.setVertexBuffer(0, app.resources.vertex_buffer, 0);
-        cmd.setResourceSet(app.resources.set);
+        cmd.setResourceSet(app.resources.set, 0);
         cmd.draw(.{ .vertex_num = 6 });
     }
 }
@@ -168,18 +168,23 @@ const Resources = struct {
 
     set: *ila.gpu.ResourceSet = undefined,
 
+    const main_resource_set_desc: ila.gpu.ResourceSetDesc = .init(&.{
+        .buffer(.readonly), // 0: mesh instance buffer
+        .buffer(.readonly), // 1: instance buffer
+        .buffer(.readonly), // 2: other data
+        .sampler(), // 3: sampler
+        .textureArray(4096, .readonly), // 4: textures
+    });
+
     pub fn init(self: *Resources, textures: []const *ila.gpu.Resource) !void {
         const allocator = self.allocator;
         self.* = .{ .allocator = allocator };
         errdefer self.deinit();
+
         self.pipeline_layout = try .init(allocator, .{
             .name = "graphics pipeline layout",
-            .bindings = &.{
-                .buffer(.readonly), // 0: mesh instance buffer
-                .buffer(.readonly), // 1: instance buffer
-                .buffer(.readonly), // 2:
-                .sampler(), // 3: sampler
-                .textureArray(4096, .readonly), // 4: textures
+            .sets = &.{
+                main_resource_set_desc,
             },
             .constant = .sized(u64),
         });
@@ -198,10 +203,10 @@ const Resources = struct {
         });
         graphics_pipeline_desc.addShader(.vertex(.dxil, @embedFile("compiled_shaders/triangle.vert.dxil")));
         graphics_pipeline_desc.addShader(.fragment(.dxil, @embedFile("compiled_shaders/triangle.frag.dxil")));
-        graphics_pipeline_desc.addShader(.vertex(.spirv, @embedFile("compiled_shaders/triangle.vert.spv")));
-        graphics_pipeline_desc.addShader(.fragment(.spirv, @embedFile("compiled_shaders/triangle.frag.spv")));
-        graphics_pipeline_desc.addShader(.vertex(.metal, @embedFile("compiled_shaders/triangle.vert.msl")));
-        graphics_pipeline_desc.addShader(.fragment(.metal, @embedFile("compiled_shaders/triangle.frag.msl")));
+        graphics_pipeline_desc.addShader(.vertex(.spirv, @embedFile("compiled_shaders/triangle.vert.spirv")));
+        graphics_pipeline_desc.addShader(.fragment(.spirv, @embedFile("compiled_shaders/triangle.frag.spirv")));
+        graphics_pipeline_desc.addShader(.vertex(.metal, @embedFile("compiled_shaders/triangle.vert.metal")));
+        graphics_pipeline_desc.addShader(.fragment(.metal, @embedFile("compiled_shaders/triangle.frag.metal")));
         self.pipeline = try .initGraphics(allocator, graphics_pipeline_desc);
 
         self.vertex_buffer = try .init(allocator, .{
@@ -231,7 +236,7 @@ const Resources = struct {
             },
         });
 
-        self.set = try .init(allocator, self.pipeline_layout);
+        self.set = try .init(allocator, main_resource_set_desc);
         try self.set.setResource(3, 0, self.sampler);
 
         for (textures, 0..) |texture, i| {

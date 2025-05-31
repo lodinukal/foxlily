@@ -14,8 +14,11 @@ struct vertex_to_pixel
 
 #define MAX_TEXTURES 2048
 
-SamplerState in_sampler : register(s0, space3);
-Texture2D textures[64] : register(t0, space4); // Adjust size based on actual needs
+StructuredBuffer<uint> a : register(t0, space0);
+StructuredBuffer<uint> b : register(t1, space0);
+StructuredBuffer<uint> c : register(t2, space0);
+SamplerState in_sampler : register(s3, space0);
+Texture2D textures[MAX_TEXTURES] : register(t4, space0); // Adjust size based on actual needs
 
 [shader("vertex")]
 vertex_to_pixel vertex(in vertex_info IN, uint id: SV_VertexID)

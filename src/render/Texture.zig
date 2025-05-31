@@ -178,7 +178,7 @@ pub fn upload(self: *Texture, desc: UploadDesc) !void {
 
             var eph_buffer = try desc.context.acquireTransferBuffer(content_size);
             defer desc.context.releaseTransferBuffer(eph_buffer);
-            eph_buffer.len += content_size;
+            defer eph_buffer.len += content_size;
 
             const buffer_len_before = eph_buffer.len;
             const mapped = try eph_buffer.buffer.?.map(buffer_len_before, content_size);

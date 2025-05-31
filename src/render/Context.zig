@@ -8,7 +8,7 @@ pub const min_upload_page_size = 64 * 1024 * 1024; // 64 MiB
 pub const upload_buffer_retain_size = 256 * 1024 * 1024; // 256 MiB
 
 pub const Config = struct {
-    texture_num: u32 = ila.gpu.MAX_SWAPCHAIN_IMAGES,
+    texture_num: u32 = 2,
     immediate: bool = true,
 };
 

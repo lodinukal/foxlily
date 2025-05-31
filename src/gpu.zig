@@ -132,8 +132,10 @@ pub const MAX_SWAPCHAIN_IMAGES = 4;
 /// used to specify the whole size of a buffer
 pub const WHOLE_SIZE = std.math.maxInt(u64);
 pub const WHOLE_SIZE_U32 = std.math.maxInt(u32);
-/// maximum number of bindings in a pipeline layout
-pub const MAX_BINDINGS = 16;
+/// maximum number of resource sets bound at once
+pub const MAX_RESOURCE_SETS = 4;
+/// maximum number of bindings in a resource set
+pub const MAX_BINDINGS_PER_SET = 8;
 /// maximum size of constants in bytes
 pub const MAX_CONSTANT_SIZE = 128;
 /// maximum number of viewports in a rasterization
@@ -227,8 +229,8 @@ pub const CommandBuffer = opaque {
     pub inline fn setPipeline(cmd: *CommandBuffer, pipeline: *Pipeline) void {
         return impl.call(.setPipeline, void, .{ cmd, pipeline });
     }
-    pub inline fn setResourceSet(cmd: *CommandBuffer, set: *ResourceSet) void {
-        return impl.call(.setResourceSet, void, .{ cmd, set });
+    pub inline fn setResourceSet(cmd: *CommandBuffer, set: *ResourceSet, index: u32) void {
+        return impl.call(.setResourceSet, void, .{ cmd, set, index });
     }
     pub inline fn setConstant(cmd: *CommandBuffer, data: []const u8) void {
         return impl.call(.setConstant, void, .{ cmd, data });
@@ -392,8 +394,8 @@ pub const Resource = opaque {
 
 /// stores a set of resource bindings which can be bound and unbound
 pub const ResourceSet = opaque {
-    pub inline fn init(allocator: std.mem.Allocator, pipeline_layout: *PipelineLayout) Error!*ResourceSet {
-        return impl.call(.initResourceSet, Error!*ResourceSet, .{ allocator, pipeline_layout });
+    pub inline fn init(allocator: std.mem.Allocator, desc: ResourceSetDesc) Error!*ResourceSet {
+        return impl.call(.initResourceSet, Error!*ResourceSet, .{ allocator, desc });
     }
     pub inline fn deinit(set: *ResourceSet) void {
         impl.call(.deinitResourceSet, void, .{set});
@@ -837,16 +839,23 @@ pub const BufferResourceDesc = struct {
     offset: u64 = 0,
 };
 
-/// the binding model of ila's gpu abstraction is similar to metal's.
-/// a shader can have multiple bindings identified by a binding index
+/// the binding model of ila's gpu abstraction is composed of sets with bindings.
+/// a shader can have multiple sets, each set can have multiple bindings, and each binding can have multiple resources.
 ///
 /// for example:
 /// ```hlsl
 /// Texture2D textures[4] : register(t0, space0);
-/// RWBuffer<uint> buffers[2] : register(t0, space1);
+/// RWBuffer<uint> buffers[2] : register(t4, space0);
+///
+/// SamplerState samplers[2] : register(s0, space1);
+/// Buffer<float> constants : register(b2, space1);
 /// ```
-/// in this case, there are two bindings, one for textures and one for buffers
-/// the binding index is 0 for textures and 1 for buffers; the space is the index.
+/// In this case, there are two sets, one with textures and buffers, and another with samplers and constants.
+/// The first set has 2 bindings consisting of 4 textures and 2 buffers, and the second set has 2 bindings
+/// consisting of 2 samplers and a constant buffer.
+///
+/// On d3d12: sets are described by the spaces, and bindings are described by the registers ignoring the s t u b prefixes.
+/// On vulkan: sets are described by the descriptor sets, and bindings are described by the descriptor bindings.
 ///
 /// describes a single binding
 pub const ResourceBinding = struct {
@@ -943,6 +952,15 @@ pub const ResourceBinding = struct {
             .resource_num = num,
             .kind = if (writable == .writable) .uav_structured_buffer else .srv_structured_buffer,
         };
+    }
+};
+
+/// A set of resources that can be bound to a pipeline
+pub const ResourceSetDesc = struct {
+    bindings: []const ResourceBinding = &.{},
+
+    pub fn init(bindings: []const ResourceBinding) ResourceSetDesc {
+        return .{ .bindings = bindings };
     }
 };
 
@@ -1051,11 +1069,11 @@ pub const VertexInput = struct {
 /// on d3d12, it will place 8 bytes of constants at set 999, binding 0 for
 /// indirect args
 ///
-/// the constants will be placed in space MAX_BINDINGS
+/// the constants will be placed in space MAX_RESOURCE_SETS
 pub const PipelineLayoutDesc = struct {
     name: []const u8 = &.{},
     constant: ?Constant = null,
-    bindings: []const ResourceBinding = &.{},
+    sets: []const ResourceSetDesc = &.{},
 };
 
 /// describes how pixels are filled in primitives
@@ -1582,6 +1600,7 @@ pub const TextureDataLayout = struct {
 pub const ClearBufferDesc = struct {
     buffer: *Resource,
     value: u32 = 0,
+    set_index: u32,
     binding_index: u32,
     resource_index: u32 = 0,
 };
@@ -1589,6 +1608,7 @@ pub const ClearBufferDesc = struct {
 pub const ClearTextureDesc = struct {
     texture: *Resource,
     value: ClearValue,
+    set_index: u32,
     binding_index: u32,
     resource_index: u32 = 0,
 };

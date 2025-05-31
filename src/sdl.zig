@@ -58,6 +58,11 @@ fn catchError(un: anytype, id: @TypeOf(.enum_literal)) c.SDL_AppResult {
         error.SDLAppSuccess => return c.SDL_APP_SUCCESS,
         else => {
             var buffer: [512]u8 = @splat(0);
+            if (@errorReturnTrace()) |trace| {
+                std.io.getStdErr().writer().print("Error trace: {}\n", .{trace}) catch |write_err| {
+                    std.debug.print("Unable to print error trace: {s}\n", .{@errorName(write_err)});
+                };
+            }
             _ = c.SDL_ShowSimpleMessageBox(
                 c.SDL_MESSAGEBOX_ERROR,
                 "Error",
@@ -116,8 +121,10 @@ fn emulatedMain() !void {
     }
 
     var state: *allowzero anyopaque = @ptrFromInt(0);
+    // try init(@alignCast(@ptrCast(&state)), converted_args);
     var result = catchError(init(@alignCast(@ptrCast(&state)), converted_args), .SDL_AppInit);
     if (result != c.SDL_APP_CONTINUE) return;
+    // var result: c.SDL_AppResult = c.SDL_APP_CONTINUE;
 
     loop: while (true) {
         var e: c.SDL_Event = undefined;
