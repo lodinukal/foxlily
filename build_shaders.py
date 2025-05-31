@@ -1,12 +1,12 @@
 import os
 import shutil
+import subprocess
+import sys
 
-ALL_SHADERS = [
-    {"path": "assets/shaders/triangle.slang", "kind": "graphics"},
-]
-ILA_SHADERS = [
-    {"path": "assets/shaders/triangle.slang", "kind": "graphics"},
-]
+TRIANGLE_SHADER = {"path": "assets/shaders/triangle.slang", "kind": "graphics"}
+
+ALL_SHADERS = [TRIANGLE_SHADER]
+ILA_SHADERS = [TRIANGLE_SHADER]
 
 
 # check for a slang binary
@@ -28,19 +28,62 @@ nice_name_map = {
 
 
 def compile_shader(source, entrypoint, profile, target, destination):
+    """Compile a shader using slangc compiler.
+
+    Args:
+        source: Path to source shader file
+        entrypoint: Shader entry point name
+        profile: Target profile (e.g., 'glsl_450', 'sm_6_0')
+        target: Target platform (e.g., 'spirv', 'dxil', 'metal')
+        destination: Output directory path
+
+    Returns:
+        bool: True if compilation succeeded, False otherwise
+    """
+    # Validate inputs
+    if not os.path.exists(source):
+        print(f"Error: Source file {source} does not exist.")
+        return False
+
     # destination should look like destination/stem.entrypoint.target
     nice_name_entrypoint = nice_name_map.get(entrypoint, entrypoint)
     dest = f"{destination}/{os.path.splitext(os.path.basename(source))[0]}.{nice_name_entrypoint}.{target}"
-    command = (
-        f"slangc -o {dest} -target {target} -profile {profile} {source} "
-        + f"-fvk-use-entrypoint-name -entry {entrypoint} "
-        + "-fvk-b-shift 0 all -fvk-t-shift 0 all -fvk-s-shift 0 all -fvk-u-shift 0 all"
-    )
-    result = os.system(command)
-    if result != 0:
-        print(f"Error: Failed to compile shader {source}.")
+
+    cmd_args = [
+        "slangc",
+        "-o",
+        dest,
+        "-target",
+        target,
+        "-profile",
+        profile,
+        source,
+        "-fvk-use-entrypoint-name",
+        "-entry",
+        entrypoint,
+        "-fvk-b-shift",
+        "0",
+        "all",
+        "-fvk-t-shift",
+        "0",
+        "all",
+        "-fvk-s-shift",
+        "0",
+        "all",
+        "-fvk-u-shift",
+        "0",
+        "all",
+    ]
+
+    try:
+        result = subprocess.run(cmd_args, check=True, capture_output=True, text=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Error: Failed to compile shader {source}: {e.stderr}")
         return False
-    return True
+    except FileNotFoundError:
+        print("Error: slangc command not found.")
+        return False
 
 
 def compile_folder(destination, shaders):
@@ -85,7 +128,7 @@ def build():
 
 
 if __name__ == "__main__":
-    if build() == False:
+    if not build():
         print("Shader compilation failed.")
-        os._exit(1)
+        sys.exit(1)
     print("Shader compilation complete.")
