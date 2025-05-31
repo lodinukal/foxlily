@@ -28,7 +28,7 @@
 
     // Tracks the earliest Zig version that the package considers to be a
     // supported use case.
-    .minimum_zig_version = "0.15.0-dev.465+bb79c85cb",
+    .minimum_zig_version = "0.15.0-dev.666+c04be630d",
 
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
@@ -49,6 +49,14 @@
             .url = "git+https://github.com/lodinukal/d3d12ma#5361513570f104696e5a7de59904adf4f4b79df1",
             .hash = "N-V-__8AAE6ESgCFTzK1zhBDBljTF8qhjntc8_NWcam3rCV2",
             .lazy = true,
+        },
+        .spirv_cross = .{
+            .url = "git+https://github.com/InKryption/SPIRV-Cross.git#0a7784f0eaeecfcafe8c59cd4f8096c56ff093e8",
+            .hash = "spirv_cross-1.4.309-bvxN_HT1LgAd0LxYuPDkGrU0_Tl_MBNQ9iGSpZj73a0D",
+        },
+        .zstbi = .{
+            .url = "git+https://github.com/zig-gamedev/zstbi.git#094c4bba5cdbec167d3f6aaa98cccccd5c99145f",
+            .hash = "zstbi-0.11.0-dev-L0Ea_-eVBwCl8RYA98PhLDw3Fhw5k7FJOHSMDKWDOvqx",
         },
     },
     .paths = .{

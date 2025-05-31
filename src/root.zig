@@ -1,9 +1,11 @@
 const std = @import("std");
 
+pub const Resource = @import("Resource.zig");
 pub const gpu = @import("gpu.zig");
 pub const sdl = @import("sdl.zig");
 pub const media = @import("media.zig");
 pub const render = @import("render.zig");
+pub const util = @import("util.zig");
 
 pub const Window = extern struct {
     pub const Error = error{
@@ -88,6 +90,10 @@ pub const Window = extern struct {
         );
         _ = result;
     }
+
+    pub fn setTitle(self: *Window, title: [:0]const u8) void {
+        sdl.c.SDL_SetWindowTitle(self.impl, title.ptr);
+    }
 };
 
 /// an override for the gpu init, allocator
@@ -97,16 +103,23 @@ pub fn setGpuInitDesc(desc: gpu.InitDesc) void {
     gpu_init = desc;
 }
 
+const zstbi = @import("zstbi");
 pub fn init(allocator: std.mem.Allocator) !void {
+    zstbi.init(allocator);
     try gpu.init(gpu_init orelse .{ .allocator = allocator });
 }
 
 pub fn deinit() void {
     gpu.deinit();
+    zstbi.deinit();
 }
 
 comptime {
+    _ = Resource;
+    _ = render;
+    _ = Window;
     _ = sdl;
     _ = gpu;
     _ = media;
+    _ = util;
 }

@@ -6,12 +6,18 @@ pub fn build(b: *std.Build) void {
 
     const sdl_dep = b.dependency("sdl", .{
         .target = target,
-        .optimize = optimize,
+        .optimize = .ReleaseFast,
         .preferred_link_mode = .dynamic,
         //.preferred_link_mode = .static, // or .dynamic
     });
     const sdl_lib = sdl_dep.artifact("SDL3");
-    b.installArtifact(sdl_lib);
+    const sdl_dll_install_step = b.addInstallArtifact(sdl_lib, .{ .h_dir = .disabled });
+    b.getInstallStep().dependOn(&sdl_dll_install_step.step);
+
+    const zstbi_dep = b.dependency("zstbi", .{
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
 
     const tag = target.result.os.tag;
     const d3d12_option = b.option(bool, "d3d12", "enables d3d12 backend in gpu module") orelse
@@ -34,6 +40,9 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zstbi", .module = zstbi_dep.module("root") },
+        },
     });
     lib_mod.addOptions("config", options);
     lib_mod.linkLibrary(sdl_lib);
@@ -44,7 +53,7 @@ pub fn build(b: *std.Build) void {
             .name = "d3d12ma",
             .root_module = b.createModule(.{
                 .target = target,
-                .optimize = optimize,
+                .optimize = .ReleaseFast,
                 .link_libc = true,
             }),
             .linkage = .static,
@@ -65,10 +74,30 @@ pub fn build(b: *std.Build) void {
         lib_mod.linkSystemLibrary("dxgi", .{});
     }
 
-    if (tag == .windows) {
-        const zwindows = b.lazyDependency("zwindows", .{}) orelse return;
-        lib_mod.addImport("zwindows", zwindows.module("zwindows"));
+    switch (tag) {
+        .windows => {
+            const zwindows = b.lazyDependency("zwindows", .{}) orelse return;
+            lib_mod.addImport("zwindows", zwindows.module("zwindows"));
+            // shader compiler
+            // lib_mod.linkSystemLibrary("dxcompiler", .{});
+        },
+        .linux => {
+            // shader compiler
+            // lib_mod.addSystemIncludePath(b.path("vendor/bin"));
+            // lib_mod.linkSystemLibrary("dxcompiler", .{});
+        },
+        else => {},
     }
+
+    const spirv_cross = b.dependency("spirv_cross", .{
+        .target = target,
+        .optimize = .ReleaseFast,
+        .want_hlsl = true,
+        .want_msl = true,
+    });
+
+    const spirv_cross_c = spirv_cross.artifact("spirv-cross-c");
+    lib_mod.linkLibrary(spirv_cross_c);
 
     const lib = b.addLibrary(.{
         .linkage = .static,

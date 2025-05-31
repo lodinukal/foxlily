@@ -131,6 +131,7 @@ pub fn deinit() void {
 pub const MAX_SWAPCHAIN_IMAGES = 4;
 /// used to specify the whole size of a buffer
 pub const WHOLE_SIZE = std.math.maxInt(u64);
+pub const WHOLE_SIZE_U32 = std.math.maxInt(u32);
 /// maximum number of bindings in a pipeline layout
 pub const MAX_BINDINGS = 16;
 /// maximum size of constants in bytes
@@ -145,6 +146,15 @@ pub const MAX_ATTACHMENTS = 8;
 pub const MAX_VERTEX_BUFFERS = 8;
 /// maximum number of vertex attributes in an input layout
 pub const MAX_VERTEX_ATTRIBUTES = 16;
+
+pub const Limits = struct {
+    upload_buffer_texture_slice_alignment: u64 = 256,
+    upload_buffer_texture_row_alignment: u64 = 256,
+};
+
+pub fn limits() Limits {
+    return impl.call(.getLimits, Limits, .{});
+}
 
 pub const CommandQueue = opaque {
     pub inline fn primary() *CommandQueue {
@@ -266,8 +276,9 @@ pub const CommandBuffer = opaque {
         dst_region_opt: ?TextureRegion,
         src: *Buffer,
         src_data_layout: TextureDataLayout,
+        plane_flags: PlaneFlags,
     ) void {
-        return impl.call(.copyBufferToTexture, void, .{ cmd, dst, dst_region_opt, src, src_data_layout });
+        return impl.call(.copyBufferToTexture, void, .{ cmd, dst, dst_region_opt, src, src_data_layout, plane_flags });
     }
     pub inline fn copyTextureToBuffer(
         cmd: *CommandBuffer,
@@ -331,6 +342,9 @@ pub const Buffer = opaque {
     pub inline fn unmap(buffer: *Buffer) void {
         impl.call(.unmapBuffer, void, .{buffer});
     }
+    pub inline fn getDesc(buffer: *Buffer) BufferDesc {
+        return impl.call(.getBufferDesc, BufferDesc, .{buffer});
+    }
 };
 
 pub const Texture = opaque {
@@ -339,6 +353,9 @@ pub const Texture = opaque {
     }
     pub inline fn deinit(texture: *Texture) void {
         impl.call(.deinitTexture, void, .{texture});
+    }
+    pub inline fn getDesc(texture: *Texture) TextureDesc {
+        return impl.call(.getTextureDesc, TextureDesc, .{texture});
     }
 };
 
@@ -463,6 +480,7 @@ pub const Format = enum(u32) {
     R16F,
     R16,
     R32F,
+    R32UI,
     RG32F,
     SRGB,
     SRGBA,
@@ -492,16 +510,34 @@ pub const Format = enum(u32) {
 
     pub fn isInteger(format: Format) bool {
         return switch (format) {
-            .R8, .RG8, .RGBA8, .RGBA16, .BC1, .BC2, .BC3, .BC4, .BC5, .R16, .RG16 => true,
+            .R8, .RG8, .RGBA8, .RGBA16, .R32UI, .BC1, .BC2, .BC3, .BC4, .BC5, .R16, .RG16 => true,
             else => false,
+        };
+    }
+
+    pub fn stride(format: Format) u32 {
+        return switch (format) {
+            .R8 => 1,
+            .RG8 => 2,
+            .D32, .D24S8 => 4,
+            .RGBA8, .BGRA8, .SRGB, .SRGBA => 4,
+            .RGBA16 => 8,
+            .RGBA16F => 8,
+            .RG16F => 4,
+            .R16F, .R16 => 2,
+            .R32F, .R32UI => 4,
+            .RG32F => 8,
+            .RGB32F => 12,
+            .BC1, .BC2, .BC3, .BC4, .BC5 => 8,
+            else => 0,
         };
     }
 };
 
 pub const PlaneFlags = packed struct(u8) {
-    color: bool = false,
-    depth: bool = false,
-    stencil: bool = false,
+    color: bool = true,
+    depth: bool = true,
+    stencil: bool = true,
     _: u5 = 0,
 };
 
@@ -747,6 +783,8 @@ pub const TextureState = enum(u32) {
     depth_stencil,
     shader_resource,
     unordered_access,
+    copy_source,
+    copy_dest,
 };
 
 /// describes a buffer resource, like what size it has, what heap it is on, and
@@ -1527,9 +1565,9 @@ pub const TextureRegion = struct {
     x: u32 = 0,
     y: u32 = 0,
     z: u32 = 0,
-    width: u32 = WHOLE_SIZE,
-    height: u32 = WHOLE_SIZE,
-    depth: u32 = WHOLE_SIZE,
+    width: u32 = WHOLE_SIZE_U32,
+    height: u32 = WHOLE_SIZE_U32,
+    depth: u32 = WHOLE_SIZE_U32,
     mip: u32 = 0,
     layer: u32 = 0,
 };
@@ -1651,7 +1689,7 @@ pub fn getDimensionMipAdjusted(
         else => unreachable,
     }
 
-    dimension = @max(1, dimension >> mip);
+    dimension = @max(1, dimension >> @as(u5, @intCast(mip)));
 
     if (dimension_index < 2) {
         const block_width = Format.blockWidth(desc.format);

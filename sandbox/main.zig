@@ -7,8 +7,9 @@ const builtin = @import("builtin");
 const native_os = builtin.os.tag;
 const native_abi = builtin.abi;
 
-const SCREEN_WIDTH = 640;
-const SCREEN_HEIGHT = 480;
+const logic_rate = 120;
+const logic_time: i128 = @divTrunc(std.time.ns_per_s, logic_rate);
+const delta_time: f64 = 1.0 / (logic_rate * 1.0);
 
 const App = struct {
     allocator: std.mem.Allocator,
@@ -18,8 +19,13 @@ const App = struct {
     context: ila.render.Context,
 
     resources: Resources,
+
+    pukeko_image: ila.Resource.Image = undefined,
+    pukeko_texture: ila.render.Texture = undefined,
+    accumulated_time: i128 = 0,
 };
-const AppError = sdl.SDLAppError || ila.gpu.Error || ila.Window.Error || error{OutOfMemory};
+const AppError = sdl.SDLAppError || ila.gpu.Error || ila.Window.Error || error{OutOfMemory} ||
+    error{ InvalidImageFormat, ImageInitFailed } || error{TransferNotInProgress};
 
 pub const main = sdl.main;
 pub const std_options = sdl.std_options;
@@ -34,26 +40,57 @@ pub fn init(app_state: **App, args: []const [*:0]const u8) AppError!void {
             .ReleaseFast, .ReleaseSmall => .{ std.heap.smp_allocator, false },
         };
     };
+    try ila.init(gpa);
+    errdefer ila.deinit();
 
     const app = gpa.create(App) catch @panic("App allocation failed");
+    errdefer gpa.destroy(app);
     app_state.* = app;
-    app.allocator = gpa;
-    app.is_debug = is_debug;
-
-    try ila.init(gpa);
-
-    const window = try ila.Window.init("Runoff", 800, 600, .{
-        .resizable = true,
-    });
-
-    app.context = try .fromWindow(app.allocator, window, .{});
+    app.* = .{
+        .allocator = gpa,
+        .is_debug = is_debug,
+        .window = try .init("sandbox", 800, 600, .{
+            .resizable = true,
+        }),
+        .context = try .fromWindow(app.allocator, app.window, .{
+            .immediate = true,
+        }),
+        .resources = .{ .allocator = gpa },
+    };
     try app.context.start();
 
-    app.resources.allocator = app.allocator;
-    try app.resources.init();
+    // Load an image asset
+    app.pukeko_image = ila.Resource.Image.loadFromPath(app.allocator, "assets/images/pukeko.jpg") catch |err| {
+        std.log.info("could not load pukeko image: {}", .{err});
+        return err;
+    };
+    app.pukeko_texture = ila.render.Texture.fromImage(app.allocator, .{
+        .context = &app.context,
+        .image = &app.pukeko_image,
+    }) catch |err| {
+        std.log.info("could not create pukeko texture: {}", .{err});
+        return err;
+    };
+    try app.resources.init(&.{
+        app.pukeko_texture.srv.?,
+    });
 
     for (args) |arg| {
         std.log.info("arg: {s}", .{arg});
+    }
+}
+
+pub fn deinit(app: *App, _: sdl.c.SDL_AppResult) void {
+    app.pukeko_image.deinit();
+    app.pukeko_texture.deinit();
+
+    app.resources.deinit();
+    app.context.deinit();
+    app.window.deinit();
+    ila.deinit();
+
+    if (app.is_debug) {
+        _ = debug_allocator.deinit();
     }
 }
 
@@ -61,17 +98,19 @@ pub fn tick(app: *App) AppError!void {
     const window_vp = app.context.viewport();
     const window_rect = app.context.rect();
 
-    {
+    app.accumulated_time += app.context.previous_frame_time;
+
+    while (app.accumulated_time >= logic_time) : (app.accumulated_time -= logic_time) {
         // rotate the rect
         const mapped = app.resources.mapped;
         for (mapped) |*vertex| {
-            const angle = std.math.pi / 180.0 * 0.01;
+            const angle = std.math.pi / 180.0 * 30 * delta_time; // rotate 30 degrees per second
             const cos = std.math.cos(angle);
             const sin = std.math.sin(angle);
             const x = vertex.position[0] * cos - vertex.position[1] * sin;
             const y = vertex.position[0] * sin + vertex.position[1] * cos;
-            vertex.position[0] = x;
-            vertex.position[1] = y;
+            vertex.position[0] = @floatCast(x);
+            vertex.position[1] = @floatCast(y);
         }
     }
 
@@ -110,20 +149,10 @@ pub fn event(app: *App, ev: *sdl.c.SDL_Event) AppError!void {
     }
 }
 
-pub fn deinit(app: *App, _: sdl.c.SDL_AppResult) void {
-    app.resources.deinit();
-    app.context.deinit();
-    app.window.deinit();
-    ila.deinit();
-
-    if (app.is_debug) {
-        _ = debug_allocator.deinit();
-    }
-}
-
 const Vertex = extern struct {
     position: [3]f32,
     color: [3]f32,
+    texcoord: [2]f32 = .{ 0, 0 },
 };
 
 const Resources = struct {
@@ -139,7 +168,7 @@ const Resources = struct {
 
     set: *ila.gpu.ResourceSet = undefined,
 
-    pub fn init(self: *Resources) !void {
+    pub fn init(self: *Resources, textures: []const *ila.gpu.Resource) !void {
         const allocator = self.allocator;
         self.* = .{ .allocator = allocator };
         errdefer self.deinit();
@@ -159,6 +188,7 @@ const Resources = struct {
         graphics_pipeline_desc.vertexAttributes(&.{
             .attr(0, @offsetOf(Vertex, "position"), .vec3, 0),
             .attr(1, @offsetOf(Vertex, "color"), .vec3, 0),
+            .attr(2, @offsetOf(Vertex, "texcoord"), .vec2, 0),
         });
         graphics_pipeline_desc.vertexStreams(&.{
             .stream(@sizeOf(Vertex), .vertex),
@@ -185,18 +215,28 @@ const Resources = struct {
         const mapped_raw = try self.vertex_buffer.map(0, null);
         const mapped: []align(1) Vertex = @ptrCast(mapped_raw);
         // make a rect with 6 vertices
-        mapped[0] = .{ .position = .{ -0.5, -0.5, 0 }, .color = .{ 1, 0, 0 } };
-        mapped[1] = .{ .position = .{ 0.5, -0.5, 0 }, .color = .{ 0, 1, 0 } };
-        mapped[2] = .{ .position = .{ -0.5, 0.5, 0 }, .color = .{ 0, 0, 1 } };
-        mapped[3] = .{ .position = .{ 0.5, -0.5, 0 }, .color = .{ 0, 1, 0 } };
-        mapped[4] = .{ .position = .{ 0.5, 0.5, 0 }, .color = .{ 1, 1, 0 } };
-        mapped[5] = .{ .position = .{ -0.5, 0.5, 0 }, .color = .{ 0, 0, 1 } };
+        mapped[0] = .{ .position = .{ -0.5, -0.5, 0 }, .color = .{ 1, 0, 0 }, .texcoord = .{ 0, 0 } };
+        mapped[1] = .{ .position = .{ 0.5, -0.5, 0 }, .color = .{ 0, 1, 0 }, .texcoord = .{ 1, 0 } };
+        mapped[2] = .{ .position = .{ -0.5, 0.5, 0 }, .color = .{ 0, 0, 1 }, .texcoord = .{ 0, 1 } };
+        mapped[3] = .{ .position = .{ 0.5, -0.5, 0 }, .color = .{ 0, 1, 0 }, .texcoord = .{ 1, 0 } };
+        mapped[4] = .{ .position = .{ 0.5, 0.5, 0 }, .color = .{ 1, 1, 0 }, .texcoord = .{ 1, 1 } };
+        mapped[5] = .{ .position = .{ -0.5, 0.5, 0 }, .color = .{ 0, 0, 1 }, .texcoord = .{ 0, 1 } };
         self.mapped = mapped;
 
-        self.sampler = try .initSampler(allocator, .{});
+        self.sampler = try .initSampler(allocator, .{
+            .filters = .{
+                .min = .linear,
+                .mag = .linear,
+                .mip = .linear,
+            },
+        });
 
         self.set = try .init(allocator, self.pipeline_layout);
         try self.set.setResource(3, 0, self.sampler);
+
+        for (textures, 0..) |texture, i| {
+            try self.set.setResource(4, @intCast(i), texture);
+        }
     }
 
     // pub const deinit = ;

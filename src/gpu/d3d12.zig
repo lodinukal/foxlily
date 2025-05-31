@@ -205,6 +205,15 @@ pub fn deinit() void {
     }
 }
 
+pub fn getLimits() gpu.Limits {
+    return .{
+        // D3D12_TEXTURE_DATA_PITCH_ALIGNMENT
+        .upload_buffer_texture_row_alignment = 256,
+        // D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT
+        .upload_buffer_texture_slice_alignment = 512,
+    };
+}
+
 const D3DDescriptor = struct {
     heap_type: d3d12.DESCRIPTOR_HEAP_TYPE,
     range: RangeAllocator.Range,
@@ -414,6 +423,14 @@ pub fn initTextureResource(
     };
     srv_desc.Shader4ComponentMapping = d3d12.DEFAULT_SHADER_4_COMPONENT_MAPPING;
 
+    var uav_desc = std.mem.zeroes(d3d12.UNORDERED_ACCESS_VIEW_DESC);
+    uav_desc.Format = conv.formatTo(texture_ptr.desc.format);
+    uav_desc.ViewDimension = switch (desc.dimension) {
+        .d1 => .TEXTURE1D,
+        .d2 => .TEXTURE2D,
+        .d3 => .TEXTURE3D,
+    };
+
     var rtv_desc = std.mem.zeroes(d3d12.RENDER_TARGET_VIEW_DESC);
     rtv_desc.Format = conv.formatTo(texture_ptr.desc.format);
     rtv_desc.ViewDimension = switch (desc.dimension) {
@@ -493,6 +510,23 @@ pub fn initTextureResource(
                 },
             }
             try resource_ptr.createRtv(rtv_desc);
+        },
+        .uav => {
+            switch (desc.dimension) {
+                .d1 => {
+                    uav_desc.u.Texture1D.MipSlice = desc.mip_start;
+                },
+                .d2 => {
+                    uav_desc.u.Texture2D.MipSlice = desc.mip_start;
+                    uav_desc.u.Texture2D.PlaneSlice = 0;
+                },
+                .d3 => {
+                    uav_desc.u.Texture3D.MipSlice = desc.mip_start;
+                    uav_desc.u.Texture3D.FirstWSlice = desc.layer_start;
+                    uav_desc.u.Texture3D.WSize = remaining_layers;
+                },
+            }
+            try resource_ptr.createUav(texture_ptr.desc.format.isInteger(), uav_desc);
         },
         else => {
             log.err("not implemented resource kind: {s}", .{@tagName(desc.kind)});
@@ -717,7 +751,7 @@ pub fn setResource(resource_set: *gpu.ResourceSet, binding: u32, offset: u32, re
     }
 }
 
-const D3DCommandQueue = struct {
+pub const D3DCommandQueue = struct {
     allocator: std.mem.Allocator,
 
     d3d_queue: *d3d12.ICommandQueue,
@@ -1411,7 +1445,7 @@ pub fn dispatchIndirect(cmd: *gpu.CommandBuffer, desc: gpu.DispatchIndirect) voi
     }
 }
 
-pub fn copyBuffertoBuffer(cmd: *gpu.CommandBuffer, dst: *gpu.Buffer, dst_offset: u64, src: *gpu.Buffer, src_offset: u64, size: u64) void {
+pub fn copyBufferToBuffer(cmd: *gpu.CommandBuffer, dst: *gpu.Buffer, dst_offset: u64, src: *gpu.Buffer, src_offset: u64, size: u64) void {
     const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
     const dst_ptr: *D3DBuffer = @ptrCast(@alignCast(dst));
     const src_ptr: *D3DBuffer = @ptrCast(@alignCast(src));
@@ -1469,9 +1503,9 @@ pub fn copyTextureToTexture(
     };
 
     const size: [3]u32 = .{
-        if (src_region.width == gpu.WHOLE_SIZE) gpu.getDimensionMipAdjusted(src_ptr.desc, 0, src_region.mip) else src_region.width,
-        if (src_region.height == gpu.WHOLE_SIZE) gpu.getDimensionMipAdjusted(src_ptr.desc, 1, src_region.mip) else src_region.height,
-        if (src_region.depth == gpu.WHOLE_SIZE) gpu.getDimensionMipAdjusted(src_ptr.desc, 2, src_region.mip) else src_region.depth,
+        if (src_region.width == gpu.WHOLE_SIZE_U32) gpu.getDimensionMipAdjusted(src_ptr.desc, 0, src_region.mip) else src_region.width,
+        if (src_region.height == gpu.WHOLE_SIZE_U32) gpu.getDimensionMipAdjusted(src_ptr.desc, 1, src_region.mip) else src_region.height,
+        if (src_region.depth == gpu.WHOLE_SIZE_U32) gpu.getDimensionMipAdjusted(src_ptr.desc, 2, src_region.mip) else src_region.depth,
     };
 
     const box: d3d12.BOX = .{
@@ -1499,12 +1533,13 @@ pub fn copyBufferToTexture(
     dst_region_opt: ?gpu.TextureRegion,
     src: *gpu.Buffer,
     src_data_layout: gpu.TextureDataLayout,
+    plane_flags: gpu.PlaneFlags,
 ) void {
     const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
     const dst_ptr: *D3DTexture = @ptrCast(@alignCast(dst));
     const src_ptr: *D3DBuffer = @ptrCast(@alignCast(src));
 
-    const dst_region = dst_region_opt orelse .{};
+    const dst_region: gpu.TextureRegion = dst_region_opt orelse .{};
 
     const dst_texture_copy_location: d3d12.TEXTURE_COPY_LOCATION = .{
         .pResource = dst_ptr.d3d_texture,
@@ -1513,13 +1548,14 @@ pub fn copyBufferToTexture(
             dst_ptr.desc,
             dst_region.layer,
             dst_region.mip,
+            plane_flags,
         ) },
     };
 
     const size: [3]u32 = .{
-        if (dst_region.width == gpu.WHOLE_SIZE) gpu.getDimensionMipAdjusted(dst_ptr.desc, 0, dst_region.mip) else dst_region.width,
-        if (dst_region.height == gpu.WHOLE_SIZE) gpu.getDimensionMipAdjusted(dst_ptr.desc, 1, dst_region.mip) else dst_region.height,
-        if (dst_region.depth == gpu.WHOLE_SIZE) gpu.getDimensionMipAdjusted(dst_ptr.desc, 2, dst_region.mip) else dst_region.depth,
+        if (dst_region.width == gpu.WHOLE_SIZE_U32) gpu.getDimensionMipAdjusted(dst_ptr.desc, 0, dst_region.mip) else dst_region.width,
+        if (dst_region.height == gpu.WHOLE_SIZE_U32) gpu.getDimensionMipAdjusted(dst_ptr.desc, 1, dst_region.mip) else dst_region.height,
+        if (dst_region.depth == gpu.WHOLE_SIZE_U32) gpu.getDimensionMipAdjusted(dst_ptr.desc, 2, dst_region.mip) else dst_region.depth,
     };
 
     const src_texture_copy_location: d3d12.TEXTURE_COPY_LOCATION = .{
@@ -1585,9 +1621,9 @@ pub fn copyTextureToBuffer(
     };
 
     const size: [3]u32 = .{
-        if (src_region.width == gpu.WHOLE_SIZE) gpu.getDimensionMipAdjusted(src_ptr.desc, 0, src_region.mip) else src_region.width,
-        if (src_region.height == gpu.WHOLE_SIZE) gpu.getDimensionMipAdjusted(src_ptr.desc, 1, src_region.mip) else src_region.height,
-        if (src_region.depth == gpu.WHOLE_SIZE) gpu.getDimensionMipAdjusted(src_ptr.desc, 2, src_region.mip) else src_region.depth,
+        if (src_region.width == gpu.WHOLE_SIZE_U32) gpu.getDimensionMipAdjusted(src_ptr.desc, 0, src_region.mip) else src_region.width,
+        if (src_region.height == gpu.WHOLE_SIZE_U32) gpu.getDimensionMipAdjusted(src_ptr.desc, 1, src_region.mip) else src_region.height,
+        if (src_region.depth == gpu.WHOLE_SIZE_U32) gpu.getDimensionMipAdjusted(src_ptr.desc, 2, src_region.mip) else src_region.depth,
     };
 
     const src_texture_copy_location: d3d12.TEXTURE_COPY_LOCATION = .{
@@ -1878,6 +1914,11 @@ pub fn unmapBuffer(buffer: *gpu.Buffer) void {
     buffer_ptr.resource.Unmap(0, null);
 }
 
+pub fn getBufferDesc(buffer: *gpu.Buffer) gpu.BufferDesc {
+    const buffer_ptr: *D3DBuffer = @ptrCast(@alignCast(buffer));
+    return buffer_ptr.desc;
+}
+
 const D3DTexture = struct {
     allocator: ?std.mem.Allocator = null,
     d3d_texture: *d3d12.IResource,
@@ -1984,6 +2025,11 @@ pub fn deinitTexture(texture: *gpu.Texture) void {
         a.Release();
 
     if (texture_ptr.allocator) |allocator| allocator.destroy(texture_ptr);
+}
+
+pub fn getTextureDesc(texture: *gpu.Texture) gpu.TextureDesc {
+    const texture_ptr: *D3DTexture = @ptrCast(@alignCast(texture));
+    return texture_ptr.desc;
 }
 
 fn textureDescFromResource(resource: *d3d12.IResource) gpu.TextureDesc {
@@ -2753,6 +2799,7 @@ const conv = struct {
             .R16F => .R16_FLOAT,
             .R16 => .R16_UNORM,
             .R32F => .R32_FLOAT,
+            .R32UI => .R32_UINT,
             .RG32F => .R32G32_FLOAT,
             .SRGB => .R8G8B8A8_UNORM_SRGB,
             .SRGBA => .R8G8B8A8_UNORM_SRGB,
@@ -2783,6 +2830,7 @@ const conv = struct {
             .R16_FLOAT => .R16F,
             .R16_UNORM => .R16,
             .R32_FLOAT => .R32F,
+            .R32_UINT => .R32UI,
             .R32G32_FLOAT => .RG32F,
             .R8G8B8A8_UNORM_SRGB => .SRGBA,
             .BC1_UNORM => .BC1,
@@ -2825,6 +2873,12 @@ const conv = struct {
             },
             .unordered_access => return .{
                 .UNORDERED_ACCESS = true,
+            },
+            .copy_source => return .{
+                .COPY_SOURCE = true,
+            },
+            .copy_dest => return .{
+                .COPY_DEST = true,
             },
         }
     }
@@ -2940,11 +2994,19 @@ fn getTextureSubResourceIndex(
     var plane_index: u32 = 0;
     const is_all_planes = plane_flags.color and plane_flags.depth and plane_flags.stencil;
     if (!is_all_planes) {
+        // Ensure at least one plane is specified
+        if (!plane_flags.depth and !plane_flags.stencil) {
+            @panic("Invalid plane flags: at least depth or stencil must be set");
+        }
+        // For depth/stencil formats, color flag should not be set individually
+        if (plane_flags.color and (plane_flags.depth or plane_flags.stencil)) {
+            @panic("Invalid plane flags: color cannot be combined with depth/stencil individually");
+        }
         if (plane_flags.depth) {
             plane_index = 0;
         } else if (plane_flags.stencil) {
             plane_index = 1;
-        } else @panic("Invalid plane flags, either depth or stencil must be set or all planes");
+        }
     }
     return mip_offset + (layer_offset + plane_index * desc.layer_num) * desc.mip_num;
 }
