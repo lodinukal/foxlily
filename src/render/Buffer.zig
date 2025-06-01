@@ -163,7 +163,29 @@ pub fn setSlice(self: *Buffer, desc: SetDesc) !void {
     }
     // is memory mapped
     std.debug.assert(desc.offset + desc.data.len <= self.desc.size);
-    const mapped = try self.buffer.?.map(desc.offset, desc.data.len);
-    defer self.buffer.?.unmap();
+    const mapped = try self.map(.offsetSize(desc.offset, desc.data.len));
+    defer self.unmap();
     @memcpy(mapped, desc.data);
+}
+
+pub fn map(self: *Buffer, range: ila.gpu.Buffer.Range) ![]u8 {
+    const buffer = self.buffer orelse return error.NoBuffer;
+    const real_size = range.realSize(buffer);
+    std.debug.assert(range.offset + real_size <= self.desc.size);
+    std.debug.assert(self.desc.location == .host_upload or self.desc.location == .host_readback);
+    const mapped = try buffer.map(range);
+    return mapped;
+}
+
+pub fn mapSlice(self: *Buffer, comptime T: type, range: ila.gpu.Buffer.Range) ![]align(1) T {
+    const real_size = range.realSize(self.buffer orelse return error.NoBuffer);
+    std.debug.assert(real_size % @sizeOf(T) == 0);
+    const mapped = try self.map(range);
+    return std.mem.bytesAsSlice(T, mapped);
+}
+
+pub fn unmap(self: *Buffer) void {
+    if (self.buffer) |buf| {
+        buf.unmap();
+    }
 }

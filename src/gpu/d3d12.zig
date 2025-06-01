@@ -217,14 +217,14 @@ pub fn getLimits() gpu.Limits {
 const D3DDescriptor = struct {
     heap_type: d3d12.DESCRIPTOR_HEAP_TYPE,
     range_type: d3d12.DESCRIPTOR_RANGE_TYPE,
-    range: RangeAllocator.Range,
+    allocation: Allocation,
 };
 
 // need to set heap_type and shader_visible before init
 const D3DDescriptorHeap = struct {
     d3d_heap: *d3d12.IDescriptorHeap,
     heap_type: d3d12.DESCRIPTOR_HEAP_TYPE,
-    range_allocator: RangeAllocator,
+    offset_allocator: OffsetAllocator,
     base_cpu: d3d12.CPU_DESCRIPTOR_HANDLE,
     base_gpu: ?d3d12.GPU_DESCRIPTOR_HANDLE,
     descriptor_size: u32,
@@ -255,26 +255,26 @@ const D3DDescriptorHeap = struct {
         }
         self.descriptor_size = device.GetDescriptorHandleIncrementSize(self.heap_type);
 
-        self.range_allocator = try .init(allocator, count);
+        self.offset_allocator = try .init(allocator, count, count);
     }
 
     pub fn deinit(self: *D3DDescriptorHeap, _: std.mem.Allocator) void {
-        self.range_allocator.deinit();
+        self.offset_allocator.deinit();
         _ = self.d3d_heap.Release();
     }
 
     pub fn alloc(self: *D3DDescriptorHeap, tag_range_type: d3d12.DESCRIPTOR_RANGE_TYPE, count: u32) !D3DDescriptor {
-        const range = try self.range_allocator.allocate(count);
+        const allocation = try self.offset_allocator.allocate(count);
         return .{
             .heap_type = self.heap_type,
             .range_type = tag_range_type,
-            .range = range,
+            .allocation = allocation,
         };
     }
 
     pub fn free(self: *D3DDescriptorHeap, desc: D3DDescriptor) void {
         // TODO: handle this
-        self.range_allocator.free(desc.range) catch unreachable;
+        self.offset_allocator.free(desc.allocation) catch @panic("Failed to free descriptor allocation");
     }
 };
 
@@ -294,7 +294,7 @@ fn getStagingHeapCpuPointer(handle: D3DDescriptor) d3d12.CPU_DESCRIPTOR_HANDLE {
     const instance = getInstance() catch return .{ .ptr = 0 };
     const heap = &instance.staging_heaps[@intFromEnum(handle.heap_type)];
     return .{
-        .ptr = heap.base_cpu.ptr + @as(usize, handle.range.start) * @as(usize, heap.descriptor_size),
+        .ptr = heap.base_cpu.ptr + @as(usize, handle.allocation.offset) * @as(usize, heap.descriptor_size),
     };
 }
 
@@ -314,7 +314,7 @@ fn getGpuHeapGpuPointer(handle: D3DDescriptor, offset: usize) d3d12.GPU_DESCRIPT
     const instance = getInstance() catch return .{ .ptr = 0 };
     const heap = &instance.gpu_heaps[@intFromEnum(handle.heap_type)];
     return .{
-        .ptr = heap.base_gpu.?.ptr + (@as(usize, handle.range.start) + offset) *
+        .ptr = heap.base_gpu.?.ptr + (@as(usize, handle.allocation.offset) + offset) *
             @as(usize, heap.descriptor_size),
     };
 }
@@ -324,7 +324,7 @@ fn getGpuHeapCpuPointer(handle: D3DDescriptor, offset: usize) d3d12.CPU_DESCRIPT
     const heap = &instance.gpu_heaps[@intFromEnum(handle.heap_type)];
     return .{
         .ptr = heap.base_cpu.ptr +
-            (@as(usize, handle.range.start) + offset) * @as(usize, heap.descriptor_size),
+            (@as(usize, handle.allocation.offset) + offset) * @as(usize, heap.descriptor_size),
     };
 }
 
@@ -587,6 +587,7 @@ pub fn initBufferResource(
             var cbv_desc = std.mem.zeroes(d3d12.CONSTANT_BUFFER_VIEW_DESC);
             cbv_desc.BufferLocation = resource_ptr.buffer_gpu_location;
             cbv_desc.SizeInBytes = @intCast(size);
+            std.debug.assert(cbv_desc.SizeInBytes % d3d12.CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT == 0);
             try resource_ptr.createCbv(cbv_desc);
         },
         else => return error.InvalidResourceKind,
@@ -657,6 +658,7 @@ const D3DResourceSet = struct {
     allocator: std.mem.Allocator,
 
     bound: std.BoundedArray(D3DDescriptor, gpu.MAX_BINDINGS_PER_SET),
+    gpu_addresses: std.BoundedArray(d3d12.GPU_VIRTUAL_ADDRESS, gpu.MAX_BINDINGS_PER_SET),
     is_set: std.BoundedArray(bool, gpu.MAX_BINDINGS_PER_SET),
 };
 
@@ -665,6 +667,7 @@ pub fn initResourceSet(allocator: std.mem.Allocator, desc: gpu.ResourceSetDesc) 
     resource_set_ptr.allocator = allocator;
     resource_set_ptr.bound = .{};
     resource_set_ptr.is_set = .{};
+    resource_set_ptr.gpu_addresses = .{};
 
     for (desc.bindings) |binding| {
         const range_type: d3d12.DESCRIPTOR_RANGE_TYPE = switch (binding.kind) {
@@ -693,6 +696,7 @@ pub fn initResourceSet(allocator: std.mem.Allocator, desc: gpu.ResourceSetDesc) 
             try resource_set_ptr.bound.append(descriptor);
         }
         try resource_set_ptr.is_set.append(false);
+        try resource_set_ptr.gpu_addresses.append(0);
     }
 
     return @ptrCast(resource_set_ptr);
@@ -708,10 +712,10 @@ pub fn deinitResourceSet(resource_set: *gpu.ResourceSet) void {
     resource_set_ptr.allocator.destroy(resource_set_ptr);
 }
 
-pub fn setResource(resource_set: *gpu.ResourceSet, binding: u32, offset: u32, resource: *gpu.Resource) gpu.Error!void {
+pub fn setResource(resource_set: *gpu.ResourceSet, binding: u32, offset: u32, resource: ?*gpu.Resource) gpu.Error!void {
     const instance = try getInstance();
     const resource_set_ptr: *D3DResourceSet = @ptrCast(@alignCast(resource_set));
-    const resource_ptr: *D3DResource = @ptrCast(@alignCast(resource));
+    const resource_ptr: ?*D3DResource = if (resource) |r| @ptrCast(@alignCast(r)) else null;
 
     if (binding >= resource_set_ptr.bound.len) {
         return error.InvalidResourceBinding;
@@ -720,38 +724,41 @@ pub fn setResource(resource_set: *gpu.ResourceSet, binding: u32, offset: u32, re
     const descriptor = resource_set_ptr.bound.get(binding);
     const heap_type: d3d12.DESCRIPTOR_HEAP_TYPE = descriptor.heap_type;
 
-    if (resource_ptr.heap_type != heap_type) {
+    if (resource_ptr) |r| if (r.heap_type != heap_type) {
         log.err("resource heap type mismatch: {s} != {s}", .{
-            @tagName(resource_ptr.heap_type),
+            @tagName(r.heap_type),
             @tagName(heap_type),
         });
         return error.InvalidResource;
-    }
+    };
 
-    const count = descriptor.range.size();
+    const count = descriptor.allocation.size;
     const is_table = !(count == 1 and
         descriptor.heap_type != .SAMPLER);
 
+    const src: d3d12.CPU_DESCRIPTOR_HANDLE = if (resource_ptr) |r|
+        getStagingHeapCpuPointer(r.cpu_handle)
+    else
+        .{ .ptr = 0 };
     // const root_param = resource_set_ptr.pipeline_layout.root_params[binding];
     if (is_table) {
         if (offset >= count) {
             return error.InvalidResourceBinding;
         }
         const dst = getGpuHeapCpuPointer(descriptor, offset);
-        const src = getStagingHeapCpuPointer(resource_ptr.cpu_handle);
         instance.device.CopyDescriptorsSimple(1, dst, src, descriptor.heap_type);
         resource_set_ptr.is_set.buffer[binding] = true;
     } else {
         const dst = getGpuHeapCpuPointer(descriptor, 0);
-        const src = getStagingHeapCpuPointer(resource_ptr.cpu_handle);
-        const matches: bool = @reduce(.Or, @Vector(3, bool){
-            descriptor.range_type == .CBV and resource_ptr.binding_type == .cbv,
-            descriptor.range_type == .SRV and resource_ptr.binding_type == .srv,
-            descriptor.range_type == .UAV and resource_ptr.binding_type == .uav,
-        });
+        const matches: bool = if (resource_ptr) |r| @reduce(.Or, @Vector(3, bool){
+            descriptor.range_type == .CBV and r.binding_type == .cbv,
+            descriptor.range_type == .SRV and r.binding_type == .srv,
+            descriptor.range_type == .UAV and r.binding_type == .uav,
+        }) else true;
         if (matches) {
             instance.device.CopyDescriptorsSimple(1, dst, src, heap_type);
             resource_set_ptr.is_set.buffer[binding] = true;
+            resource_set_ptr.gpu_addresses.buffer[binding] = if (resource_ptr) |r| r.buffer_gpu_location else 0;
         } else {
             return error.InvalidResourceBinding;
         }
@@ -1243,43 +1250,47 @@ pub fn setResourceSet(
     const root_param_offset = cmd_ptr.pipeline_layout.?.set_indices[index];
 
     for (resource_set_ptr.bound.constSlice(), 0..) |descriptor, i| {
-        const root_param = cmd_ptr.pipeline_layout.?.root_params[root_param_offset + i];
-        const gpu_address = if (resource_set_ptr.is_set.get(i)) getGpuHeapGpuPointer(descriptor, 0).ptr else continue;
+        const root_param_i = root_param_offset + i;
+        const root_param = cmd_ptr.pipeline_layout.?.root_params[root_param_i];
+        const gpu_descriptor = if (resource_set_ptr.is_set.get(i)) getGpuHeapGpuPointer(descriptor, 0) else continue;
         if (root_param.ParameterType != .DESCRIPTOR_TABLE) {
             switch (root_param.ParameterType) {
                 .SRV => {
+                    const gpu_address = gpu_descriptor.ptr;
                     if (cmd_ptr.is_graphics)
                         cmd_ptr.command_list.SetGraphicsRootShaderResourceView(
-                            @intCast(i),
+                            @intCast(root_param_i),
                             gpu_address,
                         )
                     else
                         cmd_ptr.command_list.SetComputeRootShaderResourceView(
-                            @intCast(i),
+                            @intCast(root_param_i),
                             gpu_address,
                         );
                 },
                 .UAV => {
+                    const gpu_address = gpu_descriptor.ptr;
                     if (cmd_ptr.is_graphics)
                         cmd_ptr.command_list.SetGraphicsRootUnorderedAccessView(
-                            @intCast(i),
+                            @intCast(root_param_i),
                             gpu_address,
                         )
                     else
                         cmd_ptr.command_list.SetComputeRootUnorderedAccessView(
-                            @intCast(i),
+                            @intCast(root_param_i),
                             gpu_address,
                         );
                 },
                 .CBV => {
+                    const gpu_address = resource_set_ptr.gpu_addresses.get(i);
                     if (cmd_ptr.is_graphics)
                         cmd_ptr.command_list.SetGraphicsRootConstantBufferView(
-                            @intCast(i),
+                            @intCast(root_param_i),
                             gpu_address,
                         )
                     else
                         cmd_ptr.command_list.SetComputeRootConstantBufferView(
-                            @intCast(i),
+                            @intCast(root_param_i),
                             gpu_address,
                         );
                 },
@@ -1288,13 +1299,13 @@ pub fn setResourceSet(
         } else {
             if (cmd_ptr.is_graphics)
                 cmd_ptr.command_list.SetGraphicsRootDescriptorTable(
-                    @intCast(i),
-                    .{ .ptr = gpu_address },
+                    @intCast(root_param_i),
+                    gpu_descriptor,
                 )
             else
                 cmd_ptr.command_list.SetComputeRootDescriptorTable(
-                    @intCast(i),
-                    .{ .ptr = gpu_address },
+                    @intCast(root_param_i),
+                    gpu_descriptor,
                 );
         }
     }
@@ -1895,26 +1906,24 @@ pub fn deinitBuffer(buffer: *gpu.Buffer) void {
     buffer_ptr.allocator.destroy(buffer_ptr);
 }
 
-pub fn mapBuffer(
-    buffer: *gpu.Buffer,
-    offset: u64,
-    size: u64,
-) ![]u8 {
+pub fn mapBuffer(buffer: *gpu.Buffer, range: gpu.Buffer.Range) ![]u8 {
     const buffer_ptr: *D3DBuffer = @ptrCast(@alignCast(buffer));
 
     if (buffer_ptr.is_mapped) {
         return error.BufferAlreadyMapped;
     }
 
+    const offset = range.offset;
+    const size = range.size;
     const real_size = if (size == gpu.WHOLE_SIZE) buffer_ptr.desc.size - offset else size;
 
-    const range: d3d12.RANGE = .{
+    const d3d12_range: d3d12.RANGE = .{
         .Begin = offset,
         .End = offset + real_size,
     };
 
     var ptr_data: ?[*]u8 = null;
-    const hr_map = buffer_ptr.resource.Map(0, if (size == gpu.WHOLE_SIZE) null else &range, @ptrCast(&ptr_data));
+    const hr_map = buffer_ptr.resource.Map(0, if (size == gpu.WHOLE_SIZE) null else &d3d12_range, @ptrCast(&ptr_data));
     if (hr_map != windows.S_OK) {
         return error.D3D12InternalError;
     }
@@ -3071,5 +3080,5 @@ const std = @import("std");
 const sdl = @import("../sdl.zig");
 const foxlily = @import("../root.zig");
 
-const allocators = @import("allocators.zig");
-const RangeAllocator = allocators.RangeAllocator;
+const OffsetAllocator = @import("OffsetAllocator.zig");
+const Allocation = OffsetAllocator.Allocation;

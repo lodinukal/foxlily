@@ -6,6 +6,7 @@ pub const sdl = @import("sdl.zig");
 pub const media = @import("media.zig");
 pub const render = @import("render.zig");
 pub const util = @import("util.zig");
+pub const math = @import("zmath.zig");
 
 pub const Window = extern struct {
     pub const Error = error{

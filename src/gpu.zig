@@ -331,6 +331,28 @@ pub const Pipeline = opaque {
 };
 
 pub const Buffer = opaque {
+    pub const Range = extern struct {
+        offset: u64 = 0,
+        size: u64 = WHOLE_SIZE,
+
+        pub const whole: Range = .{ .offset = 0, .size = WHOLE_SIZE };
+
+        pub fn offsetRest(offset: u64) Range {
+            return .{ .offset = offset, .size = WHOLE_SIZE };
+        }
+
+        pub fn offsetSize(offset: u64, size: u64) Range {
+            return .{ .offset = offset, .size = size };
+        }
+
+        pub fn realSize(self: Range, buffer: *Buffer) u64 {
+            if (self.size == WHOLE_SIZE) {
+                return buffer.getDesc().size - self.offset;
+            }
+            return self.size;
+        }
+    };
+
     pub inline fn init(allocator: std.mem.Allocator, desc: BufferDesc) Error!*Buffer {
         return impl.call(.initBuffer, Error!*Buffer, .{ allocator, desc });
     }
@@ -338,8 +360,8 @@ pub const Buffer = opaque {
         return impl.call(.deinitBuffer, void, .{buffer});
     }
 
-    pub inline fn map(buffer: *Buffer, offset: u64, size: ?u64) ![]u8 {
-        return impl.call(.mapBuffer, Error![]u8, .{ buffer, offset, size orelse WHOLE_SIZE });
+    pub inline fn map(buffer: *Buffer, range: Range) ![]u8 {
+        return impl.call(.mapBuffer, Error![]u8, .{ buffer, range });
     }
     pub inline fn unmap(buffer: *Buffer) void {
         impl.call(.unmapBuffer, void, .{buffer});
@@ -401,7 +423,7 @@ pub const ResourceSet = opaque {
         impl.call(.deinitResourceSet, void, .{set});
     }
 
-    pub inline fn setResource(set: *ResourceSet, binding: u32, offset: u32, resource: *Resource) Error!void {
+    pub inline fn setResource(set: *ResourceSet, binding: u32, offset: u32, resource: ?*Resource) Error!void {
         return impl.call(.setResource, Error!void, .{ set, binding, offset, resource });
     }
 };
@@ -445,7 +467,7 @@ pub const InitDesc = struct {
     limits: ResourceLimits = .{},
     validation: ValidationLevel = switch (builtin.mode) {
         .ReleaseFast => .none,
-        else => .normal,
+        else => .full,
     },
 };
 
@@ -797,7 +819,7 @@ pub const BufferDesc = struct {
     location: MemoryLocation,
     size: u64,
     /// setting this will result the buffer being a ssbo on vulkan
-    structure_stride: u32,
+    structure_stride: u32 = 0,
 };
 
 pub const BufferState = enum(u32) {

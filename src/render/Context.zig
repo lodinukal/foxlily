@@ -10,11 +10,14 @@ pub const upload_buffer_retain_size = 256 * 1024 * 1024; // 256 MiB
 pub const Config = struct {
     texture_num: u32 = 2,
     immediate: bool = true,
+
+    max_bound_textures: u32 = 4096, // 4096 textures
 };
 
 allocator: std.mem.Allocator,
 frame_arena: std.heap.ArenaAllocator,
 limits: ila.gpu.Limits,
+config: Config,
 
 window: ila.Window,
 swapchain_desc: ila.gpu.SwapchainDesc,
@@ -36,13 +39,38 @@ frame_srvs: [ila.gpu.MAX_SWAPCHAIN_IMAGES]?*ila.gpu.Resource = @splat(null),
 queue_resize: ?ila.gpu.Vec2u = null,
 
 // transfer resources:
-transfer_free_buffer_mutex: std.Thread.Mutex = .{},
-transfer_in_progress: bool = false,
-transfer_cmd_queue: *ila.gpu.CommandQueue = undefined,
-transfer_cmd_buf: *ila.gpu.CommandBuffer = undefined,
-transfer_fence: *ila.gpu.Fence = undefined,
-transfer_fence_value: u64 = 0,
-transfer_free_buffers: std.ArrayListUnmanaged(ila.render.Buffer) = .empty,
+transfer: struct {
+    free_buffer_mutex: std.Thread.Mutex = .{},
+    in_progress: bool = false,
+    cmd_queue: *ila.gpu.CommandQueue = undefined,
+    cmd_buf: *ila.gpu.CommandBuffer = undefined,
+    fence: *ila.gpu.Fence = undefined,
+    fence_value: u64 = 0,
+    free_buffers: std.ArrayListUnmanaged(ila.render.Buffer) = .empty,
+    awaiting_free_buffers: std.ArrayListUnmanaged(FrameTaggedBuffer) = .empty,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        self.free_buffer_mutex.lock();
+        defer self.free_buffer_mutex.unlock();
+
+        self.cmd_buf.deinit();
+        self.cmd_queue.deinit();
+        self.fence.deinit();
+        for (self.awaiting_free_buffers.items) |*buf| {
+            buf.buffer.deinit();
+        }
+        self.awaiting_free_buffers.deinit(allocator);
+        self.awaiting_free_buffers = .empty;
+        for (self.free_buffers.items) |*buf| {
+            buf.deinit();
+        }
+        self.free_buffers.deinit(allocator);
+        self.free_buffers = .empty;
+        self.in_progress = false;
+    }
+} = .{},
+
+resources: ila.render.Shared = undefined,
 
 // maybe have a fromTexture function later?
 pub fn fromWindow(allocator: std.mem.Allocator, window: ila.Window, config: Config) !Context {
@@ -50,6 +78,7 @@ pub fn fromWindow(allocator: std.mem.Allocator, window: ila.Window, config: Conf
         .allocator = allocator,
         .frame_arena = .init(allocator),
         .limits = ila.gpu.limits(),
+        .config = config,
         .window = window,
         .swapchain_desc = .{
             .name = "swapchain",
@@ -76,12 +105,18 @@ pub fn start(self: *Context) !void {
     }
 
     // transfer resources
-    self.transfer_cmd_queue = try .init(self.allocator, .{
+    self.transfer.cmd_queue = try .init(self.allocator, .{
         .name = "transfer queue",
         .kind = .graphics,
     });
-    self.transfer_cmd_buf = try .init(self.allocator, self.transfer_cmd_queue);
-    self.transfer_fence = try .init(self.allocator);
+    self.transfer.cmd_buf = try .init(self.allocator, self.transfer.cmd_queue);
+    self.transfer.fence = try .init(self.allocator);
+
+    // resources
+    self.resources = .{
+        .context = self,
+    };
+    try self.resources.init(self.config.max_bound_textures);
 }
 
 pub fn deinit(self: *Context) void {
@@ -100,18 +135,9 @@ pub fn deinit(self: *Context) void {
     self.frame_arena.deinit();
 
     // deinit transfer resources
-    self.transfer_free_buffer_mutex.lock();
-    defer self.transfer_free_buffer_mutex.unlock();
+    self.transfer.deinit(self.allocator);
 
-    self.transfer_cmd_buf.deinit();
-    self.transfer_cmd_queue.deinit();
-    self.transfer_fence.deinit();
-    for (self.transfer_free_buffers.items) |*buf| {
-        buf.deinit();
-    }
-    self.transfer_free_buffers.deinit(self.allocator);
-    self.transfer_free_buffers = .empty;
-    self.transfer_in_progress = false;
+    self.resources.deinit();
 }
 
 fn cleanupSwapchainResources(self: *Context) void {
@@ -173,6 +199,39 @@ pub inline fn viewport(self: *Context) ila.gpu.Viewport {
     };
 }
 
+/// processes any frame operations that need to be done before rendering
+pub fn processOperations(self: *Context) !void {
+    {
+        // process any pending transfer buffers
+        self.transfer.free_buffer_mutex.lock();
+        defer self.transfer.free_buffer_mutex.unlock();
+
+        var available_capacity: u64 = 0;
+        for (self.transfer.free_buffers.items) |buf| {
+            available_capacity += buf.unusedCapacity();
+        }
+
+        // free any transfer buffers that are no longer in use
+        for (self.transfer.awaiting_free_buffers.items) |*tagged_buf| {
+            if (tagged_buf.frame > self.frame_index) continue;
+
+            const capacity = tagged_buf.buffer.unusedCapacity();
+            if (available_capacity + capacity > upload_buffer_retain_size) {
+                // we have enough free buffers, deinit this one
+                tagged_buf.buffer.deinit();
+                continue;
+            }
+            available_capacity += capacity;
+
+            // otherwise, add it to the free list
+            self.transfer.free_buffers.append(self.allocator, tagged_buf.buffer) catch {
+                std.debug.panic("Failed to append transfer buffer to free list", .{});
+            };
+        }
+        self.transfer.awaiting_free_buffers.clearRetainingCapacity();
+    }
+}
+
 /// waits until the current frame is able to be rendered
 pub fn waitReadyRender(self: *Context) !void {
     if (self.frame_index >= self.swapchain_desc.texture_num) {
@@ -193,6 +252,8 @@ pub fn beginFrame(self: *Context) !*ila.gpu.CommandBuffer {
         try self.acquireSwapchainResources();
         self.queue_resize = null;
     } else try self.waitReadyRender();
+
+    try self.processOperations();
 
     const cmd = self.cmd_bufs[self.frame_index % self.swapchain_desc.texture_num];
     try cmd.begin();
@@ -216,17 +277,17 @@ pub fn endFrame(self: *Context) !void {
 
 // transfer ops
 pub fn acquireTransferBuffer(self: *Context, size: u64) !ila.render.Buffer {
-    self.transfer_free_buffer_mutex.lock();
-    defer self.transfer_free_buffer_mutex.unlock();
+    self.transfer.free_buffer_mutex.lock();
+    defer self.transfer.free_buffer_mutex.unlock();
     {
-        for (self.transfer_free_buffers.items, 0..) |buf, i| {
+        for (self.transfer.free_buffers.items, 0..) |buf, i| {
             if (buf.unusedCapacity() < size) continue;
             // found a buffer that is large enough, remove it from the free list
-            return self.transfer_free_buffers.swapRemove(i);
+            return self.transfer.free_buffers.swapRemove(i);
         }
     }
 
-    if (self.transfer_free_buffers.items.len == 0 or size > min_upload_page_size) {
+    if (self.transfer.free_buffers.items.len == 0 or size > min_upload_page_size) {
         // no free buffers or the size is larger than the minimum upload page size
         // create a new buffer
         const desc: ila.gpu.BufferDesc = .{
@@ -241,57 +302,52 @@ pub fn acquireTransferBuffer(self: *Context, size: u64) !ila.render.Buffer {
     }
 
     // use the last buffer in the list
-    return self.transfer_free_buffers.pop() orelse {
+    return self.transfer.free_buffers.pop() orelse {
         std.debug.panic("No transfer buffer available, this should not happen", .{});
     };
 }
 
-pub fn releaseTransferBuffer(self: *Context, to_release_buffer: ila.render.Buffer) void {
-    var buffer = to_release_buffer;
-    // TODO: do frame tracking to avoid resetting the buffer if it is still in use for a few frames
-    buffer.len = 0; // reset the length to 0, so that it can be reused
-    self.transfer_free_buffer_mutex.lock();
-    defer self.transfer_free_buffer_mutex.unlock();
+pub fn releaseTransferBuffer(self: *Context, buffer: ila.render.Buffer) void {
+    self.transfer.free_buffer_mutex.lock();
+    defer self.transfer.free_buffer_mutex.unlock();
 
-    var available_capacity = buffer.unusedCapacity();
-    for (self.transfer_free_buffers.items) |buf| {
-        available_capacity += buf.unusedCapacity();
-    }
-
-    if (available_capacity > upload_buffer_retain_size) {
-        // we have enough free buffers, deinit this one
-        buffer.deinit();
-        return;
-    }
-
-    self.transfer_free_buffers.append(self.allocator, buffer) catch {
+    self.transfer.awaiting_free_buffers.append(self.allocator, .{
+        .buffer = buffer,
+        .frame = self.frame_index + ila.gpu.MAX_SWAPCHAIN_IMAGES,
+    }) catch {
         std.debug.panic("Failed to append transfer buffer to free list", .{});
     };
 }
 
 pub fn transferCommandBuffer(self: *Context) !*ila.gpu.CommandBuffer {
-    if (self.transfer_in_progress) {
-        return self.transfer_cmd_buf;
+    if (self.transfer.in_progress) {
+        return self.transfer.cmd_buf;
     }
 
-    try self.transfer_cmd_buf.begin();
-    self.transfer_in_progress = true;
-    return self.transfer_cmd_buf;
+    try self.transfer.cmd_buf.begin();
+    self.transfer.in_progress = true;
+    return self.transfer.cmd_buf;
 }
 
 /// does not wait for the transfer to finish, but returns the fence value
 pub fn flushTransfer(self: *Context) !u64 {
-    if (!self.transfer_in_progress) return self.transfer_fence_value;
+    if (!self.transfer.in_progress) return self.transfer.fence_value;
 
-    try self.transfer_cmd_buf.end();
-    try self.transfer_cmd_queue.submit(self.transfer_cmd_buf);
-    self.transfer_fence_value += 1;
-    try self.transfer_cmd_queue.signalFence(self.transfer_fence, self.transfer_fence_value);
-    self.transfer_in_progress = false;
+    try self.transfer.cmd_buf.end();
+    try self.transfer.cmd_queue.submit(self.transfer.cmd_buf);
+    self.transfer.fence_value += 1;
+    try self.transfer.cmd_queue.signalFence(self.transfer.fence, self.transfer.fence_value);
+    self.transfer.in_progress = false;
 
-    return self.transfer_fence_value;
+    return self.transfer.fence_value;
 }
 
 pub fn waitTransfer(self: *Context, fence_value: u64) !void {
-    try self.transfer_fence.wait(fence_value);
+    try self.transfer.fence.wait(fence_value);
 }
+
+/// tagged with a frame index to know when the buffer is ok to return to the transfer pool
+pub const FrameTaggedBuffer = struct {
+    buffer: ila.render.Buffer,
+    frame: u64,
+};

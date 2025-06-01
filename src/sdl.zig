@@ -97,16 +97,14 @@ fn SDL_AppQuit(app: *anyopaque, result: c.SDL_AppResult) callconv(.c) void {
     deinit(@ptrCast(@alignCast(app)), result);
 }
 
-comptime {
-    if (using_sdl_callbacks) {
-        @export(&SDL_AppInit, .{ .name = "SDL_AppInit" });
-        @export(&SDL_AppIterate, .{ .name = "SDL_AppIterate" });
-        @export(&SDL_AppEvent, .{ .name = "SDL_AppEvent" });
-        @export(&SDL_AppQuit, .{ .name = "SDL_AppQuit" });
-    }
-}
-
-pub const main = if (using_sdl_callbacks) c.main else emulatedMain;
+pub const main = if (using_sdl_callbacks)
+blk: {
+    @export(&SDL_AppInit, .{ .name = "SDL_AppInit" });
+    @export(&SDL_AppIterate, .{ .name = "SDL_AppIterate" });
+    @export(&SDL_AppEvent, .{ .name = "SDL_AppEvent" });
+    @export(&SDL_AppQuit, .{ .name = "SDL_AppQuit" });
+    break :blk c.main;
+} else emulatedMain;
 
 fn emulatedMain() !void {
     var buffer: [512]u8 = @splat(0);

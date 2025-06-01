@@ -3,10 +3,10 @@ import shutil
 import subprocess
 import sys
 
-TRIANGLE_SHADER = {"path": "assets/shaders/triangle.slang", "kind": "graphics"}
+BATCH2D_SHADER = {"path": "assets/shaders/batch2d.slang", "kind": "graphics"}
 
-ALL_SHADERS = [TRIANGLE_SHADER]
-ILA_SHADERS = [TRIANGLE_SHADER]
+ALL_SHADERS = [BATCH2D_SHADER]
+ILA_SHADERS = [BATCH2D_SHADER]
 
 
 # check for a slang binary
@@ -125,6 +125,8 @@ def build():
 
     if compile_folder("src/compiled_shaders", ILA_SHADERS) == False:
         return False
+
+    return True
 
 
 if __name__ == "__main__":

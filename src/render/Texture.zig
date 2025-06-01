@@ -181,8 +181,8 @@ pub fn upload(self: *Texture, desc: UploadDesc) !void {
             defer eph_buffer.len += content_size;
 
             const buffer_len_before = eph_buffer.len;
-            const mapped = try eph_buffer.buffer.?.map(buffer_len_before, content_size);
-            defer eph_buffer.buffer.?.unmap();
+            const mapped = try eph_buffer.map(.offsetSize(buffer_len_before, content_size));
+            defer eph_buffer.unmap();
 
             var offset: usize = 0;
             for (0..subresource.slice_num) |slice| {

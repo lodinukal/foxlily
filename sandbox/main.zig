@@ -24,8 +24,9 @@ const App = struct {
     pukeko_texture: ila.render.Texture = undefined,
     accumulated_time: i128 = 0,
 };
-const AppError = sdl.SDLAppError || ila.gpu.Error || ila.Window.Error || error{OutOfMemory} ||
-    error{ InvalidImageFormat, ImageInitFailed } || error{TransferNotInProgress} || error{PathTooLong};
+const AppError = sdl.SDLAppError || ila.gpu.Error || ila.Window.Error || error{ OutOfMemory, OutOfBounds } ||
+    error{ InvalidImageFormat, ImageInitFailed } || error{TransferNotInProgress} || error{PathTooLong} ||
+    error{NoBuffer};
 
 pub const main = sdl.main;
 pub const std_options = sdl.std_options;
@@ -55,7 +56,7 @@ pub fn init(app_state: **App, args: []const [*:0]const u8) AppError!void {
         .context = try .fromWindow(app.allocator, app.window, .{
             .immediate = true,
         }),
-        .resources = .{ .allocator = gpa },
+        .resources = .{ .allocator = gpa, .context = &app.context },
     };
     try app.context.start();
 
@@ -71,9 +72,12 @@ pub fn init(app_state: **App, args: []const [*:0]const u8) AppError!void {
         std.log.info("could not create pukeko texture: {}", .{err});
         return err;
     };
-    try app.resources.init(&.{
-        app.pukeko_texture.srv.?,
-    });
+
+    try app.resources.init();
+    _ = app.context.resources.addTexture(app.pukeko_texture.srv.?) catch |err| {
+        std.log.info("could not add pukeko texture in main set: {}", .{err});
+        return err;
+    };
 
     for (args) |arg| {
         std.log.info("arg: {s}", .{arg});
@@ -115,6 +119,15 @@ pub fn tick(app: *App) AppError!void {
     }
 
     {
+        const frame_constants = app.context.resources.frameConstants(app.context.backbuffer_index);
+        frame_constants.frame_size = .{
+            @floatFromInt(window_rect.width),
+            @floatFromInt(window_rect.height),
+        };
+        // frame_constants.projection = ila.math.orthographicRh(800, 600, 0.01, 1000);
+    }
+
+    {
         const cmd = try app.context.beginFrame();
         defer app.context.endFrame() catch |err| std.debug.panic("context.endFrame failed: {}", .{err});
 
@@ -131,7 +144,8 @@ pub fn tick(app: *App) AppError!void {
         cmd.setPipelineLayout(app.resources.pipeline_layout);
         cmd.setPipeline(app.resources.pipeline);
         cmd.setVertexBuffer(0, app.resources.vertex_buffer, 0);
-        cmd.setResourceSet(app.resources.set, 0);
+        cmd.setResourceSet(app.context.resources.resource_set, 0);
+        cmd.setResourceSet(app.context.resources.frameConstantsSet(app.context.backbuffer_index), 1);
         cmd.draw(.{ .vertex_num = 6 });
     }
 }
@@ -153,10 +167,12 @@ const Vertex = extern struct {
     position: [3]f32,
     color: [3]f32,
     texcoord: [2]f32 = .{ 0, 0 },
+    texture_index: u32 = 0,
 };
 
 const Resources = struct {
     allocator: std.mem.Allocator,
+    context: *ila.render.Context,
 
     pipeline_layout: *ila.gpu.PipelineLayout = undefined,
     pipeline: *ila.gpu.Pipeline = undefined,
@@ -164,27 +180,16 @@ const Resources = struct {
     vertex_buffer: *ila.gpu.Buffer = undefined,
     mapped: []align(1) Vertex = undefined,
 
-    sampler: *ila.gpu.Resource = undefined,
-
-    set: *ila.gpu.ResourceSet = undefined,
-
-    const main_resource_set_desc: ila.gpu.ResourceSetDesc = .init(&.{
-        .buffer(.readonly), // 0: mesh instance buffer
-        .buffer(.readonly), // 1: instance buffer
-        .buffer(.readonly), // 2: other data
-        .sampler(), // 3: sampler
-        .textureArray(4096, .readonly), // 4: textures
-    });
-
-    pub fn init(self: *Resources, textures: []const *ila.gpu.Resource) !void {
+    pub fn init(self: *Resources) !void {
         const allocator = self.allocator;
-        self.* = .{ .allocator = allocator };
+        self.* = .{ .allocator = allocator, .context = self.context };
         errdefer self.deinit();
 
         self.pipeline_layout = try .init(allocator, .{
             .name = "graphics pipeline layout",
             .sets = &.{
-                main_resource_set_desc,
+                self.context.resources.resource_set_desc,
+                self.context.resources.shared_constants_desc,
             },
             .constant = .sized(u64),
         });
@@ -194,19 +199,30 @@ const Resources = struct {
             .attr(0, @offsetOf(Vertex, "position"), .vec3, 0),
             .attr(1, @offsetOf(Vertex, "color"), .vec3, 0),
             .attr(2, @offsetOf(Vertex, "texcoord"), .vec2, 0),
+            .attr(3, @offsetOf(Vertex, "texture_index"), .u32, 0),
         });
         graphics_pipeline_desc.vertexStreams(&.{
             .stream(@sizeOf(Vertex), .vertex),
         });
+        const color_blend: ila.gpu.Blending = .{
+            .dst = .one,
+            .src = .src_alpha,
+            .op = .add,
+        };
+        const alpha_blend: ila.gpu.Blending = .{
+            .src = .one,
+            .dst = .one,
+            .op = .add,
+        };
         graphics_pipeline_desc.colorAttachments(&.{
-            .colorAttachment(.RGBA8, .{}, .{}, .{}),
+            .colorAttachment(.RGBA8, color_blend, alpha_blend, .{}),
         });
-        graphics_pipeline_desc.addShader(.vertex(.dxil, @embedFile("compiled_shaders/triangle.vert.dxil")));
-        graphics_pipeline_desc.addShader(.fragment(.dxil, @embedFile("compiled_shaders/triangle.frag.dxil")));
-        graphics_pipeline_desc.addShader(.vertex(.spirv, @embedFile("compiled_shaders/triangle.vert.spirv")));
-        graphics_pipeline_desc.addShader(.fragment(.spirv, @embedFile("compiled_shaders/triangle.frag.spirv")));
-        graphics_pipeline_desc.addShader(.vertex(.metal, @embedFile("compiled_shaders/triangle.vert.metal")));
-        graphics_pipeline_desc.addShader(.fragment(.metal, @embedFile("compiled_shaders/triangle.frag.metal")));
+        graphics_pipeline_desc.addShader(.vertex(.dxil, @embedFile("compiled_shaders/batch2d.vert.dxil")));
+        graphics_pipeline_desc.addShader(.fragment(.dxil, @embedFile("compiled_shaders/batch2d.frag.dxil")));
+        graphics_pipeline_desc.addShader(.vertex(.spirv, @embedFile("compiled_shaders/batch2d.vert.spirv")));
+        graphics_pipeline_desc.addShader(.fragment(.spirv, @embedFile("compiled_shaders/batch2d.frag.spirv")));
+        graphics_pipeline_desc.addShader(.vertex(.metal, @embedFile("compiled_shaders/batch2d.vert.metal")));
+        graphics_pipeline_desc.addShader(.fragment(.metal, @embedFile("compiled_shaders/batch2d.frag.metal")));
         self.pipeline = try .initGraphics(allocator, graphics_pipeline_desc);
 
         self.vertex_buffer = try .init(allocator, .{
@@ -217,31 +233,17 @@ const Resources = struct {
             .structure_stride = @sizeOf(Vertex),
         });
 
-        const mapped_raw = try self.vertex_buffer.map(0, null);
+        const mapped_raw = try self.vertex_buffer.map(.whole);
         const mapped: []align(1) Vertex = @ptrCast(mapped_raw);
         // make a rect with 6 vertices
-        mapped[0] = .{ .position = .{ -0.5, -0.5, 0 }, .color = .{ 1, 0, 0 }, .texcoord = .{ 0, 0 } };
-        mapped[1] = .{ .position = .{ 0.5, -0.5, 0 }, .color = .{ 0, 1, 0 }, .texcoord = .{ 1, 0 } };
-        mapped[2] = .{ .position = .{ -0.5, 0.5, 0 }, .color = .{ 0, 0, 1 }, .texcoord = .{ 0, 1 } };
-        mapped[3] = .{ .position = .{ 0.5, -0.5, 0 }, .color = .{ 0, 1, 0 }, .texcoord = .{ 1, 0 } };
-        mapped[4] = .{ .position = .{ 0.5, 0.5, 0 }, .color = .{ 1, 1, 0 }, .texcoord = .{ 1, 1 } };
-        mapped[5] = .{ .position = .{ -0.5, 0.5, 0 }, .color = .{ 0, 0, 1 }, .texcoord = .{ 0, 1 } };
+        const texture_index: u32 = 2; // use the third texture in the resource set
+        mapped[0] = .{ .position = .{ -0.5, -0.5, 0 }, .color = .{ 1, 0, 0 }, .texcoord = .{ 0, 0 }, .texture_index = texture_index };
+        mapped[1] = .{ .position = .{ 0.5, -0.5, 0 }, .color = .{ 0, 1, 0 }, .texcoord = .{ 1, 0 }, .texture_index = texture_index };
+        mapped[2] = .{ .position = .{ -0.5, 0.5, 0 }, .color = .{ 0, 0, 1 }, .texcoord = .{ 0, 1 }, .texture_index = texture_index };
+        mapped[3] = .{ .position = .{ 0.5, -0.5, 0 }, .color = .{ 0, 1, 0 }, .texcoord = .{ 1, 0 }, .texture_index = texture_index };
+        mapped[4] = .{ .position = .{ 0.5, 0.5, 0 }, .color = .{ 1, 1, 0 }, .texcoord = .{ 1, 1 }, .texture_index = texture_index };
+        mapped[5] = .{ .position = .{ -0.5, 0.5, 0 }, .color = .{ 0, 0, 1 }, .texcoord = .{ 0, 1 }, .texture_index = texture_index };
         self.mapped = mapped;
-
-        self.sampler = try .initSampler(allocator, .{
-            .filters = .{
-                .min = .linear,
-                .mag = .linear,
-                .mip = .linear,
-            },
-        });
-
-        self.set = try .init(allocator, main_resource_set_desc);
-        try self.set.setResource(3, 0, self.sampler);
-
-        for (textures, 0..) |texture, i| {
-            try self.set.setResource(4, @intCast(i), texture);
-        }
     }
 
     // pub const deinit = ;
@@ -250,7 +252,5 @@ const Resources = struct {
         self.pipeline.deinit();
         self.vertex_buffer.unmap();
         self.vertex_buffer.deinit();
-        self.sampler.deinit();
-        self.set.deinit();
     }
 };
