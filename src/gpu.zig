@@ -556,6 +556,20 @@ pub const Format = enum(u32) {
             else => 0,
         };
     }
+
+    pub fn isDepth(format: Format) bool {
+        return switch (format) {
+            .D32, .D24S8 => true,
+            else => false,
+        };
+    }
+
+    pub fn isStencil(format: Format) bool {
+        return switch (format) {
+            .D24S8 => true,
+            else => false,
+        };
+    }
 };
 
 pub const PlaneFlags = packed struct(u8) {
@@ -804,7 +818,8 @@ pub const TextureState = enum(u32) {
     undefined,
     present,
     render_target,
-    depth_stencil,
+    depth_stencil_write,
+    depth_stencil_read,
     shader_resource,
     unordered_access,
     copy_source,
@@ -1294,23 +1309,49 @@ pub const ColorWrite = packed struct(u8) {
 };
 
 /// describes how to clear a render target or depth stencil
-pub const Clear = struct {
-    value: ClearValue = .color(.{ 0.0, 0.0, 0.0, 0.0 }),
-    attachment_index: u32 = 0,
+pub const Clear = union(enum) {
+    _color: struct {
+        /// the value to clear the render target to
+        value: Color = .{ 0.0, 0.0, 0.0, 1.0 },
+        /// the index of the attachment to clear
+        attachment_index: u32 = 0,
+    },
+    _depth: f32,
+    _stencil: u32,
 
-    pub fn init(value: ClearValue, attachment: u32) Clear {
-        return .{ .value = value, .attachment_index = attachment };
+    pub fn color(value: Color, attachment: u32) Clear {
+        return .{ ._color = .{
+            .value = value,
+            .attachment_index = attachment,
+        } };
+    }
+
+    pub fn depth(value: f32) Clear {
+        return .{ ._depth = value };
+    }
+
+    pub fn stencil(value: u32) Clear {
+        return .{ ._stencil = value };
     }
 };
 
 /// describes how to create write to a stencil
 pub const Stencil = struct {
-    compare_op: CompareOp = .always,
+    compare_op: CompareOp = .none,
     fail_op: StencilOp = .keep,
     depth_fail_op: StencilOp = .keep,
     pass_op: StencilOp = .keep,
     write_mask: u8 = 0,
     compare_mask: u8 = 0,
+
+    pub const enabled_default: Stencil = .{
+        .compare_op = .always,
+        .fail_op = .keep,
+        .depth_fail_op = .keep,
+        .pass_op = .keep,
+        .write_mask = 0xFF,
+        .compare_mask = 0xFF,
+    };
 };
 
 /// describes how to blend colors when in the output merger

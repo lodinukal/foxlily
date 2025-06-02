@@ -14,8 +14,15 @@ uav: ?*ila.gpu.Resource,
 
 desc: ila.gpu.BufferDesc,
 len: u64,
+/// used for host mapped buffers, null if not mapped
+mapped: ?[]u8 = null,
 
-pub fn initCapacity(allocator: std.mem.Allocator, desc: ila.gpu.BufferDesc) !Buffer {
+pub const MappingMode = enum {
+    always_map,
+    map_when_needed,
+};
+
+pub fn initCapacity(allocator: std.mem.Allocator, desc: ila.gpu.BufferDesc, mode: MappingMode) !Buffer {
     var self: Buffer = .{
         .allocator = allocator,
         .buffer = null,
@@ -26,11 +33,15 @@ pub fn initCapacity(allocator: std.mem.Allocator, desc: ila.gpu.BufferDesc) !Buf
         .len = 0,
     };
     self.desc.size = 0;
-    try self.resize(desc.size);
+    try self.resize(desc.size, mode);
     return self;
 }
 
 pub fn deinit(self: *Buffer) void {
+    if (self.mapped) |_| {
+        self.buffer.?.unmap();
+    }
+
     if (self.cbv) |cbv| cbv.deinit();
     if (self.srv) |srv| srv.deinit();
     if (self.uav) |uav| uav.deinit();
@@ -46,7 +57,7 @@ pub fn unusedCapacity(self: Buffer) u64 {
     return self.desc.size - self.len;
 }
 
-pub fn resize(self: *Buffer, new_size: u64) !void {
+pub fn resize(self: *Buffer, new_size: u64, mode: MappingMode) !void {
     if (new_size == self.desc.size) return;
 
     const old_size = self.desc.size;
@@ -62,6 +73,11 @@ pub fn resize(self: *Buffer, new_size: u64) !void {
     self.deinit();
     self.len = old_len;
     self.buffer = new_buffer;
+    if (mode == .always_map) {
+        if (self.desc.location != .host_upload) {
+            std.log.err("Buffer.resize called with always_map but location is not host_upload", .{});
+        } else self.mapped = try self.buffer.?.map(.whole);
+    }
     const format: ila.gpu.Format = if (self.desc.structure_stride > 0) .unknown else .R32UI;
     if (self.desc.usage.cbv) {
         self.cbv = try .initBuffer(self.allocator, .{
@@ -172,6 +188,10 @@ pub fn map(self: *Buffer, range: ila.gpu.Buffer.Range) ![]u8 {
     const buffer = self.buffer orelse return error.NoBuffer;
     const real_size = range.realSize(buffer);
     std.debug.assert(range.offset + real_size <= self.desc.size);
+    if (self.mapped) |bytes| {
+        return bytes[range.offset..][0..real_size];
+    }
+
     std.debug.assert(self.desc.location == .host_upload or self.desc.location == .host_readback);
     const mapped = try buffer.map(range);
     return mapped;
@@ -185,6 +205,9 @@ pub fn mapSlice(self: *Buffer, comptime T: type, range: ila.gpu.Buffer.Range) ![
 }
 
 pub fn unmap(self: *Buffer) void {
+    if (self.mapped) |_| {
+        return;
+    }
     if (self.buffer) |buf| {
         buf.unmap();
     }

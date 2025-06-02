@@ -17,16 +17,16 @@ const App = struct {
 
     window: ila.Window,
     context: ila.render.Context,
-
-    resources: Resources,
+    batch2d: ila.render.Batch2D,
 
     pukeko_image: ila.Resource.Image = undefined,
     pukeko_texture: ila.render.Texture = undefined,
     accumulated_time: i128 = 0,
+    running_time: f32 = 0.0,
 };
 const AppError = sdl.SDLAppError || ila.gpu.Error || ila.Window.Error || error{ OutOfMemory, OutOfBounds } ||
     error{ InvalidImageFormat, ImageInitFailed } || error{TransferNotInProgress} || error{PathTooLong} ||
-    error{NoBuffer};
+    error{NoBuffer} || ila.render.Batch2D.Error;
 
 pub const main = sdl.main;
 pub const std_options = sdl.std_options;
@@ -56,9 +56,17 @@ pub fn init(app_state: **App, args: []const [*:0]const u8) AppError!void {
         .context = try .fromWindow(app.allocator, app.window, .{
             .immediate = true,
         }),
-        .resources = .{ .allocator = gpa, .context = &app.context },
+        .batch2d = .{
+            .context = &app.context,
+            .allocator = app.allocator,
+        },
+        // .resources = .{ .allocator = gpa, .context = &app.context },
     };
     try app.context.start();
+    errdefer app.context.deinit();
+
+    try app.batch2d.init(8192); // 8192 quads
+    errdefer app.batch2d.deinit();
 
     // Load an image asset
     app.pukeko_image = ila.Resource.Image.loadFromPath(app.allocator, "assets/images/pukeko.jpg") catch |err| {
@@ -73,7 +81,7 @@ pub fn init(app_state: **App, args: []const [*:0]const u8) AppError!void {
         return err;
     };
 
-    try app.resources.init();
+    // try app.resources.init();
     _ = app.context.resources.addTexture(app.pukeko_texture.srv.?) catch |err| {
         std.log.info("could not add pukeko texture in main set: {}", .{err});
         return err;
@@ -88,7 +96,7 @@ pub fn deinit(app: *App, _: sdl.c.SDL_AppResult) void {
     app.pukeko_image.deinit();
     app.pukeko_texture.deinit();
 
-    app.resources.deinit();
+    app.batch2d.deinit();
     app.context.deinit();
     app.window.deinit();
     ila.deinit();
@@ -99,23 +107,19 @@ pub fn deinit(app: *App, _: sdl.c.SDL_AppResult) void {
 }
 
 pub fn tick(app: *App) AppError!void {
-    const window_vp = app.context.viewport();
+    // const window_vp = app.context.viewport();
     const window_rect = app.context.rect();
 
+    const this_delta = if (app.context.previous_frame_time < std.time.ns_per_s / 2)
+        @as(f64, @floatFromInt(app.context.previous_frame_time)) / (std.time.ns_per_s * 1.0)
+    else
+        delta_time;
+
     app.accumulated_time += app.context.previous_frame_time;
+    app.running_time += @floatCast(this_delta);
 
     while (app.accumulated_time >= logic_time) : (app.accumulated_time -= logic_time) {
-        // rotate the rect
-        const mapped = app.resources.mapped;
-        for (mapped) |*vertex| {
-            const angle = std.math.pi / 180.0 * 30 * delta_time; // rotate 30 degrees per second
-            const cos = std.math.cos(angle);
-            const sin = std.math.sin(angle);
-            const x = vertex.position[0] * cos - vertex.position[1] * sin;
-            const y = vertex.position[0] * sin + vertex.position[1] * cos;
-            vertex.position[0] = @floatCast(x);
-            vertex.position[1] = @floatCast(y);
-        }
+        // logic tick
     }
 
     {
@@ -124,29 +128,69 @@ pub fn tick(app: *App) AppError!void {
             @floatFromInt(window_rect.width),
             @floatFromInt(window_rect.height),
         };
-        // frame_constants.projection = ila.math.orthographicRh(800, 600, 0.01, 1000);
+        // const aspect_ratio = frame_constants.frame_size[0] / frame_constants.frame_size[1];
+        // frame_constants.projection = ila.math.orthographicLh(aspect_ratio * 1000, 1.0 * 1000, 0.01, 1000);
+        frame_constants.projection = ila.math.orthographicLh(frame_constants.frame_size[0], frame_constants.frame_size[1], 0.01, 10000);
+
+        frame_constants.view = ila.math.lookAtLh(.{ 0.0, 0.0, 0.0, 0.0 }, .{ 0.0, 0.0, 1, 0.0 }, .{ 0.0, 1.0, 0.0, 0.0 });
+        frame_constants.model = ila.math.identity();
     }
 
     {
         const cmd = try app.context.beginFrame();
         defer app.context.endFrame() catch |err| std.debug.panic("context.endFrame failed: {}", .{err});
 
-        const b = app.context.backbuffer();
+        // const b = app.context.backbuffer();
 
-        cmd.beginRendering(.{
-            .attachments = &.{b},
+        app.context.beginRendering();
+        defer app.context.endRendering();
+
+        app.batch2d.associateCommandBuffer(cmd);
+        defer app.batch2d.flush();
+
+        const swaying_x = std.math.sin(app.running_time);
+        // std.debug.print("swaying_x: {}\n", .{swaying_x});
+
+        app.batch2d.drawQuad(.{
+            .position = .{ 500, 250, 10 },
+            .anchor = .{ 0.5, 0.5 },
+            .rotation = swaying_x * std.math.pi * 0.5,
+            .size = .{ 400, 400 },
+            .color = .{ 1, 1, 1, 1 }, // white color
+            .texture_index = 2, // use the third texture in the resource set
+            .border_width = 0.1,
+            .border_color = .{ 0.2, 0.2, 0.6, 1 }, // red border
+            .corner_radius = 0.2, // rounded corners
         });
-        defer cmd.endRendering();
 
-        cmd.setViewports(&.{window_vp});
-        cmd.setScissors(&.{window_rect});
-        cmd.clearAttachment(.init(.color(.{ 0x01.0 / 0xFF.0, 0x01.0 / 0xFF.0, 0x01.0 / 0xFF.0, 1.0 }), 0), window_rect);
-        cmd.setPipelineLayout(app.resources.pipeline_layout);
-        cmd.setPipeline(app.resources.pipeline);
-        cmd.setVertexBuffer(0, app.resources.vertex_buffer, 0);
-        cmd.setResourceSet(app.context.resources.resource_set, 0);
-        cmd.setResourceSet(app.context.resources.frameConstantsSet(app.context.backbuffer_index), 1);
-        cmd.draw(.{ .vertex_num = 6 });
+        app.batch2d.drawQuad(.{
+            .position = .{ 150, 0, 30 }, // slightly behind the first quad
+            .anchor = .{ 0.5, 1 },
+            .rotation = 0,
+            .size = .{ 300, 300 },
+            .color = .{ 1, 1, 1, 1 }, // white color
+            .texture_index = 2, // use the third texture in the resource set
+            .border_color = .{ 0.2, 0.6, 0.2, 1 }, // green border
+            .border_width = 0.1,
+            .corner_radius = 1,
+        });
+
+        // draw a grid of them
+        for (0..200) |r| {
+            for (0..90) |g| {
+                const r_f: f32 = @floatFromInt(r);
+                const g_f: f32 = @floatFromInt(g);
+                app.batch2d.drawQuad(.{
+                    .position = .{ 100 + r_f * 10.0, 100 + g_f * 10.0, 5 },
+                    .anchor = .{ 0.5, 0.5 },
+                    .rotation = 0,
+                    .size = .{ 8, 8 },
+                    .color = .{ r_f / 90, g_f / 90, 0, 1 }, // white color
+                    .texture_index = 2, // use the third texture in the resource set
+                    .corner_radius = 0.2, // rounded corners
+                });
+            }
+        }
     }
 }
 
@@ -162,95 +206,3 @@ pub fn event(app: *App, ev: *sdl.c.SDL_Event) AppError!void {
         return error.SDLAppSuccess;
     }
 }
-
-const Vertex = extern struct {
-    position: [3]f32,
-    color: [3]f32,
-    texcoord: [2]f32 = .{ 0, 0 },
-    texture_index: u32 = 0,
-};
-
-const Resources = struct {
-    allocator: std.mem.Allocator,
-    context: *ila.render.Context,
-
-    pipeline_layout: *ila.gpu.PipelineLayout = undefined,
-    pipeline: *ila.gpu.Pipeline = undefined,
-
-    vertex_buffer: *ila.gpu.Buffer = undefined,
-    mapped: []align(1) Vertex = undefined,
-
-    pub fn init(self: *Resources) !void {
-        const allocator = self.allocator;
-        self.* = .{ .allocator = allocator, .context = self.context };
-        errdefer self.deinit();
-
-        self.pipeline_layout = try .init(allocator, .{
-            .name = "graphics pipeline layout",
-            .sets = &.{
-                self.context.resources.resource_set_desc,
-                self.context.resources.shared_constants_desc,
-            },
-            .constant = .sized(u64),
-        });
-
-        var graphics_pipeline_desc: ila.gpu.GraphicsPipelineDesc = .init(self.pipeline_layout);
-        graphics_pipeline_desc.vertexAttributes(&.{
-            .attr(0, @offsetOf(Vertex, "position"), .vec3, 0),
-            .attr(1, @offsetOf(Vertex, "color"), .vec3, 0),
-            .attr(2, @offsetOf(Vertex, "texcoord"), .vec2, 0),
-            .attr(3, @offsetOf(Vertex, "texture_index"), .u32, 0),
-        });
-        graphics_pipeline_desc.vertexStreams(&.{
-            .stream(@sizeOf(Vertex), .vertex),
-        });
-        const color_blend: ila.gpu.Blending = .{
-            .dst = .one,
-            .src = .src_alpha,
-            .op = .add,
-        };
-        const alpha_blend: ila.gpu.Blending = .{
-            .src = .one,
-            .dst = .one,
-            .op = .add,
-        };
-        graphics_pipeline_desc.colorAttachments(&.{
-            .colorAttachment(.RGBA8, color_blend, alpha_blend, .{}),
-        });
-        graphics_pipeline_desc.addShader(.vertex(.dxil, @embedFile("compiled_shaders/batch2d.vert.dxil")));
-        graphics_pipeline_desc.addShader(.fragment(.dxil, @embedFile("compiled_shaders/batch2d.frag.dxil")));
-        graphics_pipeline_desc.addShader(.vertex(.spirv, @embedFile("compiled_shaders/batch2d.vert.spirv")));
-        graphics_pipeline_desc.addShader(.fragment(.spirv, @embedFile("compiled_shaders/batch2d.frag.spirv")));
-        graphics_pipeline_desc.addShader(.vertex(.metal, @embedFile("compiled_shaders/batch2d.vert.metal")));
-        graphics_pipeline_desc.addShader(.fragment(.metal, @embedFile("compiled_shaders/batch2d.frag.metal")));
-        self.pipeline = try .initGraphics(allocator, graphics_pipeline_desc);
-
-        self.vertex_buffer = try .init(allocator, .{
-            .name = "vertex buffer",
-            .size = 6 * @sizeOf(Vertex),
-            .location = .host_upload,
-            .usage = .{ .vertex = true },
-            .structure_stride = @sizeOf(Vertex),
-        });
-
-        const mapped_raw = try self.vertex_buffer.map(.whole);
-        const mapped: []align(1) Vertex = @ptrCast(mapped_raw);
-        // make a rect with 6 vertices
-        const texture_index: u32 = 2; // use the third texture in the resource set
-        mapped[0] = .{ .position = .{ -0.5, -0.5, 0 }, .color = .{ 1, 0, 0 }, .texcoord = .{ 0, 0 }, .texture_index = texture_index };
-        mapped[1] = .{ .position = .{ 0.5, -0.5, 0 }, .color = .{ 0, 1, 0 }, .texcoord = .{ 1, 0 }, .texture_index = texture_index };
-        mapped[2] = .{ .position = .{ -0.5, 0.5, 0 }, .color = .{ 0, 0, 1 }, .texcoord = .{ 0, 1 }, .texture_index = texture_index };
-        mapped[3] = .{ .position = .{ 0.5, -0.5, 0 }, .color = .{ 0, 1, 0 }, .texcoord = .{ 1, 0 }, .texture_index = texture_index };
-        mapped[4] = .{ .position = .{ 0.5, 0.5, 0 }, .color = .{ 1, 1, 0 }, .texcoord = .{ 1, 1 }, .texture_index = texture_index };
-        mapped[5] = .{ .position = .{ -0.5, 0.5, 0 }, .color = .{ 0, 0, 1 }, .texcoord = .{ 0, 1 }, .texture_index = texture_index };
-        self.mapped = mapped;
-    }
-
-    // pub const deinit = ;
-    pub fn deinit(self: Resources) void {
-        self.pipeline_layout.deinit();
-        self.pipeline.deinit();
-        self.vertex_buffer.unmap();
-        self.vertex_buffer.deinit();
-    }
-};

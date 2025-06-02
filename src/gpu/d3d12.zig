@@ -418,8 +418,11 @@ pub fn initTextureResource(
     const remaining_mips = if (desc.mip_num == 0) (texture_ptr.desc.mip_num - desc.mip_start) else desc.mip_num;
     const remaining_layers = if (desc.layer_num == 0) (texture_ptr.desc.layer_num - desc.layer_start) else desc.layer_num;
 
+    const format = desc.format;
+    const typeless = conv.formatToTypeless(format);
+
     var srv_desc = std.mem.zeroes(d3d12.SHADER_RESOURCE_VIEW_DESC);
-    srv_desc.Format = conv.formatTo(texture_ptr.desc.format);
+    srv_desc.Format = typeless;
     srv_desc.ViewDimension = switch (desc.dimension) {
         .d1 => .TEXTURE1D,
         .d2 => .TEXTURE2D,
@@ -428,7 +431,7 @@ pub fn initTextureResource(
     srv_desc.Shader4ComponentMapping = d3d12.DEFAULT_SHADER_4_COMPONENT_MAPPING;
 
     var uav_desc = std.mem.zeroes(d3d12.UNORDERED_ACCESS_VIEW_DESC);
-    uav_desc.Format = conv.formatTo(texture_ptr.desc.format);
+    uav_desc.Format = typeless;
     uav_desc.ViewDimension = switch (desc.dimension) {
         .d1 => .TEXTURE1D,
         .d2 => .TEXTURE2D,
@@ -436,12 +439,21 @@ pub fn initTextureResource(
     };
 
     var rtv_desc = std.mem.zeroes(d3d12.RENDER_TARGET_VIEW_DESC);
-    rtv_desc.Format = conv.formatTo(texture_ptr.desc.format);
+    rtv_desc.Format = typeless;
     rtv_desc.ViewDimension = switch (desc.dimension) {
         .d1 => .TEXTURE1D,
         .d2 => .TEXTURE2D,
         .d3 => .TEXTURE3D,
     };
+
+    var dsv_desc = std.mem.zeroes(d3d12.DEPTH_STENCIL_VIEW_DESC);
+    dsv_desc.Format = conv.formatTo(format);
+    dsv_desc.ViewDimension = switch (desc.dimension) {
+        .d1 => .TEXTURE1D,
+        .d2 => .TEXTURE2D,
+        .d3 => return error.InvalidResourceKind,
+    };
+    dsv_desc.Flags = .{};
 
     const resource_ptr = try allocator.create(D3DResource);
     resource_ptr.allocator = allocator;
@@ -531,6 +543,18 @@ pub fn initTextureResource(
                 },
             }
             try resource_ptr.createUav(texture_ptr.desc.format.isInteger(), uav_desc);
+        },
+        .dsv => {
+            switch (desc.dimension) {
+                .d1 => {
+                    dsv_desc.u.Texture1D.MipSlice = desc.mip_start;
+                },
+                .d2 => {
+                    dsv_desc.u.Texture2D.MipSlice = desc.mip_start;
+                },
+                else => unreachable,
+            }
+            try resource_ptr.createDsv(dsv_desc);
         },
         else => {
             log.err("not implemented resource kind: {s}", .{@tagName(desc.kind)});
@@ -825,7 +849,7 @@ pub fn waitFence(queue: *gpu.CommandQueue, fence: *gpu.Fence, value: u64) gpu.Er
     const queue_ptr: *D3DCommandQueue = @ptrCast(@alignCast(queue));
     const fence_ptr: *D3DFence = @ptrCast(@alignCast(fence));
 
-    const hr_wait = queue_ptr.d3d_queue.Signal(fence_ptr.d3d_fence, value);
+    const hr_wait = queue_ptr.d3d_queue.Wait(fence_ptr.d3d_fence, value);
     if (hr_wait != windows.S_OK) {
         return error.D3D12InternalError;
     }
@@ -854,6 +878,9 @@ const D3DCommandBuffer = struct {
     pipeline: ?*D3DPipeline,
     primitive_topology: d3d12.PRIMITIVE_TOPOLOGY,
     resource_sets: [gpu.MAX_RESOURCE_SETS]?*D3DResourceSet = empty_resource_sets,
+    /// on d3d12, pipelines must be set so the root params are known, before setting resources
+    /// so we need to store the resource sets here
+    pending_resource_setting: [gpu.MAX_RESOURCE_SETS]bool = @splat(false),
     is_graphics: bool,
 
     pub const empty_resource_sets: [gpu.MAX_RESOURCE_SETS]?*D3DResourceSet = @splat(null);
@@ -893,6 +920,7 @@ pub fn initCommandBuffer(allocator: std.mem.Allocator, queue: *gpu.CommandQueue)
     cmd_ptr.is_graphics = true;
     cmd_ptr.primitive_topology = .TRIANGLELIST;
     cmd_ptr.resource_sets = D3DCommandBuffer.empty_resource_sets;
+    cmd_ptr.pending_resource_setting = @splat(false);
     // close before use
     // ignore error here; should not happen
     _ = cmd_ptr.command_list.Close();
@@ -937,6 +965,7 @@ pub fn beginCommandBuffer(cmd: *gpu.CommandBuffer) gpu.Error!void {
     cmd_ptr.is_graphics = true;
     cmd_ptr.primitive_topology = .TRIANGLELIST;
     cmd_ptr.resource_sets = D3DCommandBuffer.empty_resource_sets;
+    cmd_ptr.pending_resource_setting = @splat(false);
 
     return;
 }
@@ -957,12 +986,11 @@ pub fn setViewports(cmd: *gpu.CommandBuffer, viewports: []const gpu.Viewport) vo
 
     var d3d_viewports: [gpu.MAX_VIEWPORTS]d3d12.VIEWPORT = undefined;
     for (viewports, 0..) |v, i| {
-        const top_left = if (v.origin_bottom_left) v.y + v.height else v.y;
         d3d_viewports[i] = .{
             .TopLeftX = v.x,
-            .TopLeftY = top_left,
+            .TopLeftY = if (v.origin_bottom_left) v.y + v.height else v.y,
             .Width = v.width,
-            .Height = v.height,
+            .Height = if (v.origin_bottom_left) -v.height else v.height,
             .MinDepth = v.min_depth,
             .MaxDepth = v.max_depth,
         };
@@ -1011,27 +1039,26 @@ pub fn clearAttachment(
         .bottom = rect.y + @as(i32, @intCast(rect.height)),
     };
 
-    switch (clear.value.kind) {
-        .color => {
-            const color = clear.value._color;
-            if (clear.attachment_index >= cmd_ptr.render_target_num) {
+    switch (clear) {
+        ._color => |color| {
+            const color_value = color.value;
+            if (color.attachment_index >= cmd_ptr.render_target_num) {
                 // log.warn("Clearing non-existent render target {}", .{clear.attachment_index});
                 return;
             }
-            const handle = cmd_ptr.render_targets[clear.attachment_index];
+            const handle = cmd_ptr.render_targets[color.attachment_index];
             // is null, do nothing
             if (handle.ptr == 0) {
                 return;
             }
             cmd_ptr.command_list.ClearRenderTargetView(
                 handle,
-                &color,
+                &color_value,
                 1,
                 @ptrCast(&d3d_rect),
             );
         },
-        .depth_stencil => {
-            const ds = clear.value._depth_stencil;
+        ._depth => |depth| {
             const handle = cmd_ptr.depth_stencil;
             // is null, do nothing
             if (handle.ptr == 0) {
@@ -1039,13 +1066,32 @@ pub fn clearAttachment(
             }
             const clear_flags: d3d12.CLEAR_FLAGS = .{
                 .DEPTH = true,
+                .STENCIL = false,
+            };
+            cmd_ptr.command_list.ClearDepthStencilView(
+                handle,
+                clear_flags,
+                depth,
+                0,
+                1,
+                @ptrCast(&d3d_rect),
+            );
+        },
+        ._stencil => |stencil| {
+            const handle = cmd_ptr.depth_stencil;
+            // is null, do nothing
+            if (handle.ptr == 0) {
+                return;
+            }
+            const clear_flags: d3d12.CLEAR_FLAGS = .{
+                .DEPTH = false,
                 .STENCIL = true,
             };
             cmd_ptr.command_list.ClearDepthStencilView(
                 handle,
                 clear_flags,
-                ds.depth,
-                @intCast(ds.stencil),
+                0,
+                @intCast(stencil),
                 1,
                 @ptrCast(&d3d_rect),
             );
@@ -1166,6 +1212,9 @@ pub fn setVertexBuffer(
 
     const buffer_ptr: *D3DBuffer = @ptrCast(@alignCast(buffer));
 
+    // ensure vertex buffer
+    ensureBufferState(cmd, buffer, .vertex);
+
     const vertex_buffer_view: d3d12.VERTEX_BUFFER_VIEW = .{
         .BufferLocation = buffer_ptr.resource.GetGPUVirtualAddress() + offset,
         .SizeInBytes = @intCast(buffer_ptr.desc.size - offset),
@@ -1187,6 +1236,8 @@ pub fn setIndexBuffer(
     const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
 
     const buffer_ptr: *D3DBuffer = @ptrCast(@alignCast(buffer));
+
+    ensureBufferState(cmd, buffer, .index);
 
     const index_buffer_view: d3d12.INDEX_BUFFER_VIEW = .{
         .BufferLocation = buffer_ptr.resource.GetGPUVirtualAddress() + offset,
@@ -1213,6 +1264,15 @@ pub fn setPipelineLayout(
         cmd_ptr.command_list.SetGraphicsRootSignature(pipeline_layout_ptr.d3d_root_signature);
     } else {
         cmd_ptr.command_list.SetComputeRootSignature(pipeline_layout_ptr.d3d_root_signature);
+    }
+
+    // set the resource sets that are pending
+    for (cmd_ptr.pending_resource_setting, 0..) |pending, i| {
+        if (pending) {
+            const resource_set = cmd_ptr.resource_sets[i] orelse continue;
+            setResourceSet(cmd, @ptrCast(resource_set), @intCast(i));
+            cmd_ptr.pending_resource_setting[i] = false;
+        }
     }
 }
 
@@ -1247,7 +1307,11 @@ pub fn setResourceSet(
         return;
     }
     cmd_ptr.resource_sets[index] = resource_set_ptr;
-    const root_param_offset = cmd_ptr.pipeline_layout.?.set_indices[index];
+    const pipeline_layout = cmd_ptr.pipeline_layout orelse {
+        cmd_ptr.pending_resource_setting[index] = true;
+        return;
+    };
+    const root_param_offset = pipeline_layout.set_indices[index];
 
     for (resource_set_ptr.bound.constSlice(), 0..) |descriptor, i| {
         const root_param_i = root_param_offset + i;
@@ -1477,6 +1541,10 @@ pub fn copyBufferToBuffer(cmd: *gpu.CommandBuffer, dst: *gpu.Buffer, dst_offset:
     const dst_ptr: *D3DBuffer = @ptrCast(@alignCast(dst));
     const src_ptr: *D3DBuffer = @ptrCast(@alignCast(src));
 
+    // ensure resource state
+    ensureBufferState(cmd, dst, .copy_dest);
+    ensureBufferState(cmd, src, .copy_source);
+
     cmd_ptr.command_list.CopyBufferRegion(
         dst_ptr.resource,
         dst_offset,
@@ -1496,6 +1564,10 @@ pub fn copyTextureToTexture(
     const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
     const dst_ptr: *D3DTexture = @ptrCast(@alignCast(dst));
     const src_ptr: *D3DTexture = @ptrCast(@alignCast(src));
+
+    // ensure resource state
+    ensureTextureState(cmd, dst, .copy_dest);
+    ensureTextureState(cmd, src, .copy_source);
 
     if (dst_region_opt == null and src_region_opt == null) {
         cmd_ptr.command_list.CopyResource(
@@ -1568,6 +1640,10 @@ pub fn copyBufferToTexture(
 
     const dst_region: gpu.TextureRegion = dst_region_opt orelse .{};
 
+    // ensure resource state
+    ensureTextureState(cmd, dst, .copy_dest);
+    ensureBufferState(cmd, src, .copy_source);
+
     const dst_texture_copy_location: d3d12.TEXTURE_COPY_LOCATION = .{
         .pResource = dst_ptr.d3d_texture,
         .Type = .SUBRESOURCE_INDEX,
@@ -1631,6 +1707,10 @@ pub fn copyTextureToBuffer(
     const src_ptr: *D3DTexture = @ptrCast(@alignCast(src));
 
     const src_region = src_region_opt orelse .{};
+
+    // ensure resource state
+    ensureTextureState(cmd, src, .copy_source);
+    ensureBufferState(cmd, dst, .copy_dest);
 
     const dst_texture_copy_location: d3d12.TEXTURE_COPY_LOCATION = .{
         .pResource = dst_ptr.resource,
@@ -1755,6 +1835,7 @@ pub fn ensureBufferState(
     if (buffer_ptr.state == d3d_state) {
         return;
     }
+    // std.debug.print("Ensuring buffer state: {} -> {} for {*}", .{ (buffer_ptr.state), (d3d_state), buffer_ptr.resource });
     const barrier: d3d12.RESOURCE_BARRIER = .{
         .Type = .TRANSITION,
         .Flags = .{},
@@ -1984,7 +2065,7 @@ pub fn initTexture(allocator: std.mem.Allocator, raw_desc: gpu.TextureDesc) gpu.
         .Height = std.mem.alignForward(u32, desc.height, block_height),
         .DepthOrArraySize = @truncate(if (desc.kind == .d3) desc.depth else desc.layer_num),
         .MipLevels = @truncate(desc.mip_num),
-        .Format = conv.formatTo(desc.format),
+        .Format = conv.formatToTypeless(desc.format),
         .SampleDesc = .{ .Count = desc.sample_num, .Quality = 0 },
         .Layout = .UNKNOWN,
         .Flags = flags,
@@ -2867,6 +2948,13 @@ const conv = struct {
         };
     }
 
+    fn formatToTypeless(format: gpu.Format) dxgi.FORMAT {
+        return switch (format) {
+            .D32, .D24S8 => .R32_TYPELESS,
+            else => conv.formatTo(format),
+        };
+    }
+
     fn formatFrom(format: dxgi.FORMAT) gpu.Format {
         return switch (format) {
             .UNKNOWN => .unknown,
@@ -2915,8 +3003,10 @@ const conv = struct {
             .render_target => return .{
                 .RENDER_TARGET = true,
             },
-            .depth_stencil => return .{
+            .depth_stencil_write => return .{
                 .DEPTH_WRITE = true,
+            },
+            .depth_stencil_read => return .{
                 .DEPTH_READ = true,
             },
             .shader_resource => return .{

@@ -12,6 +12,9 @@ pub const Config = struct {
     immediate: bool = true,
 
     max_bound_textures: u32 = 4096, // 4096 textures
+    /// texture2d
+    max_quads_per_flush: u32 = 1024, // 1024 quads per flush
+    clear_color: ila.gpu.Color = .{ 0.0, 0.0, 0.0, 1.0 }, // white
 };
 
 allocator: std.mem.Allocator,
@@ -20,6 +23,7 @@ limits: ila.gpu.Limits,
 config: Config,
 
 window: ila.Window,
+queue: *ila.gpu.CommandQueue = undefined,
 swapchain_desc: ila.gpu.SwapchainDesc,
 swapchain: *ila.gpu.Swapchain = undefined,
 
@@ -35,6 +39,8 @@ cmd_bufs: [ila.gpu.MAX_SWAPCHAIN_IMAGES]*ila.gpu.CommandBuffer = @splat(undefine
 
 frame_textures: [ila.gpu.MAX_SWAPCHAIN_IMAGES]?*ila.gpu.Texture = @splat(null),
 frame_srvs: [ila.gpu.MAX_SWAPCHAIN_IMAGES]?*ila.gpu.Resource = @splat(null),
+
+frame_depth_texture: ?ila.render.Texture = null,
 
 queue_resize: ?ila.gpu.Vec2u = null,
 
@@ -80,6 +86,7 @@ pub fn fromWindow(allocator: std.mem.Allocator, window: ila.Window, config: Conf
         .limits = ila.gpu.limits(),
         .config = config,
         .window = window,
+        .queue = .primary(),
         .swapchain_desc = .{
             .name = "swapchain",
             .window = window,
@@ -99,11 +106,6 @@ pub fn start(self: *Context) !void {
     self.swapchain = try .init(self.allocator, self.swapchain_desc);
     self.frame_fence = try .init(self.allocator);
 
-    try self.acquireSwapchainResources();
-    for (&self.cmd_bufs) |*cmd| {
-        cmd.* = try .init(self.allocator, self.swapchain_desc.queue);
-    }
-
     // transfer resources
     self.transfer.cmd_queue = try .init(self.allocator, .{
         .name = "transfer queue",
@@ -111,6 +113,11 @@ pub fn start(self: *Context) !void {
     });
     self.transfer.cmd_buf = try .init(self.allocator, self.transfer.cmd_queue);
     self.transfer.fence = try .init(self.allocator);
+
+    try self.acquireSwapchainResources();
+    for (&self.cmd_bufs) |*cmd| {
+        cmd.* = try .init(self.allocator, self.swapchain_desc.queue);
+    }
 
     // resources
     self.resources = .{
@@ -134,16 +141,21 @@ pub fn deinit(self: *Context) void {
 
     self.frame_arena.deinit();
 
+    self.resources.deinit();
+
     // deinit transfer resources
     self.transfer.deinit(self.allocator);
-
-    self.resources.deinit();
 }
 
 fn cleanupSwapchainResources(self: *Context) void {
     for (self.frame_srvs[0..self.swapchain_desc.texture_num]) |*srv| {
         if (srv.*) |got_srv| got_srv.deinit();
         srv.* = null;
+    }
+
+    if (self.frame_depth_texture) |*tex| {
+        tex.deinit();
+        self.frame_depth_texture = null;
     }
     _ = self.frame_arena.reset(.retain_capacity);
 }
@@ -165,6 +177,27 @@ fn acquireSwapchainResources(self: *Context) !void {
             .layer_num = 1,
         });
     }
+    self.frame_depth_texture = try ila.render.Texture.init(self.frame_arena.allocator(), .{
+        .name = "depth texture",
+        .kind = .d2,
+        .usage = .{
+            .dsv = true,
+            .srv = true,
+        },
+        .location = .device,
+        .format = .D32,
+        .clear_value = .depth_stencil(.{}),
+        .width = self.swapchain_desc.size.x,
+        .height = self.swapchain_desc.size.y,
+        .depth = 1,
+        .mip_num = 1,
+        .layer_num = 1,
+        .sample_num = 1,
+    });
+
+    const cmd = try self.transferCommandBuffer();
+    cmd.ensureTextureState(self.frame_depth_texture.?.texture, .depth_stencil_write);
+    try self.waitTransfer(try self.flushTransfer());
 }
 
 /// resize will be performed on next beginFrame call
@@ -175,6 +208,11 @@ pub inline fn resize(self: *Context, size: ila.gpu.Vec2u) void {
 /// gets the current backbuffer rtv
 pub inline fn backbuffer(self: *Context) *ila.gpu.Resource {
     return self.frame_srvs[self.backbuffer_index].?;
+}
+
+/// gets the depth texture
+pub inline fn depthTexture(self: *Context) ila.render.Texture {
+    return self.frame_depth_texture.?; // FIXME: self.backbuffer_index
 }
 
 /// gets the rectangle for the current window size
@@ -188,6 +226,7 @@ pub inline fn rect(self: *Context) ila.gpu.Rect {
 }
 
 pub inline fn viewport(self: *Context) ila.gpu.Viewport {
+    // const is_origin_bottom_left = self.limits.viewport_origin_bottom_left;
     return .{
         .x = 0.0,
         .y = 0.0,
@@ -195,7 +234,7 @@ pub inline fn viewport(self: *Context) ila.gpu.Viewport {
         .height = @floatFromInt(self.swapchain_desc.size.y),
         .min_depth = 0.0,
         .max_depth = 1.0,
-        .origin_bottom_left = false,
+        .origin_bottom_left = true,
     };
 }
 
@@ -275,6 +314,37 @@ pub fn endFrame(self: *Context) !void {
     try self.swapchain_desc.queue.signalFence(self.frame_fence, self.frame_index);
 }
 
+pub fn beginRendering(self: *Context) void {
+    const b = self.backbuffer();
+    self.beginRenderingToAttachments(&.{b});
+}
+
+pub fn beginRenderingToAttachments(self: *Context, attachments: []const *ila.gpu.Resource) void {
+    const cmd = self.cmd_bufs[self.frame_index % self.swapchain_desc.texture_num];
+
+    const window_vp = self.viewport();
+    const window_rect = self.rect();
+
+    const depth_texture = self.depthTexture();
+    cmd.beginRendering(.{
+        .attachments = attachments,
+        .depth_stencil = depth_texture.dsv.?,
+    });
+
+    cmd.setViewports(&.{window_vp});
+    cmd.setScissors(&.{window_rect});
+    cmd.clearAttachment(.color(self.config.clear_color, 0), window_rect);
+    cmd.clearAttachment(.depth(1.0), window_rect);
+    // cmd.setDepthBounds(0.0, 1.0);
+    cmd.setResourceSet(self.resources.resource_set, 0);
+    cmd.setResourceSet(self.resources.frameConstantsSet(self.backbuffer_index), 1);
+}
+
+pub fn endRendering(self: *Context) void {
+    const cmd = self.cmd_bufs[self.frame_index % self.swapchain_desc.texture_num];
+    cmd.endRendering();
+}
+
 // transfer ops
 pub fn acquireTransferBuffer(self: *Context, size: u64) !ila.render.Buffer {
     self.transfer.free_buffer_mutex.lock();
@@ -297,7 +367,7 @@ pub fn acquireTransferBuffer(self: *Context, size: u64) !ila.render.Buffer {
             .usage = .{},
             .structure_stride = 0, // no structure stride for transfer buffers
         };
-        const new_buffer: ila.render.Buffer = try .initCapacity(self.allocator, desc);
+        const new_buffer: ila.render.Buffer = try .initCapacity(self.allocator, desc, .map_when_needed);
         return new_buffer;
     }
 
@@ -335,15 +405,20 @@ pub fn flushTransfer(self: *Context) !u64 {
 
     try self.transfer.cmd_buf.end();
     try self.transfer.cmd_queue.submit(self.transfer.cmd_buf);
-    self.transfer.fence_value += 1;
     try self.transfer.cmd_queue.signalFence(self.transfer.fence, self.transfer.fence_value);
     self.transfer.in_progress = false;
+    defer self.transfer.fence_value += 1;
 
     return self.transfer.fence_value;
 }
 
 pub fn waitTransfer(self: *Context, fence_value: u64) !void {
     try self.transfer.fence.wait(fence_value);
+}
+
+pub fn graphicsWaitTransfer(self: *Context, fence_value: u64) !void {
+    // wait for the transfer to finish before continuing
+    try self.swapchain_desc.queue.waitFence(self.transfer.fence, fence_value);
 }
 
 /// tagged with a frame index to know when the buffer is ok to return to the transfer pool

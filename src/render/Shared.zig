@@ -96,7 +96,7 @@ pub fn init(self: *Shared, max_bound_textures: u32) !void {
                 .cbv = true,
             },
             .size = @sizeOf(Constants) * ila.gpu.MAX_SWAPCHAIN_IMAGES,
-        }),
+        }, .always_map),
         .mapped_constants = try self.cbuffer.mapSlice(Constants, .whole),
     };
 

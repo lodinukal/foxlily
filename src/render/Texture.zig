@@ -24,6 +24,10 @@ pub fn init(allocator: std.mem.Allocator, desc: ila.gpu.TextureDesc) !Texture {
         .desc = desc,
     };
     self.texture = try ila.gpu.Texture.init(allocator, desc);
+    const fixed_format: ila.gpu.Format = if (desc.usage.dsv) switch (desc.format) {
+        .D32 => .R32F,
+        else => desc.format,
+    } else desc.format;
     if (desc.usage.srv) {
         // TODO: cubes?
         self.srv = try ila.gpu.Resource.initTexture(allocator, .{
@@ -31,7 +35,7 @@ pub fn init(allocator: std.mem.Allocator, desc: ila.gpu.TextureDesc) !Texture {
             .texture = self.texture,
             .dimension = desc.kind,
             .kind = .srv,
-            .format = desc.format,
+            .format = fixed_format,
             .layer_num = desc.layer_num,
             .mip_num = desc.mip_num,
         });
@@ -42,7 +46,7 @@ pub fn init(allocator: std.mem.Allocator, desc: ila.gpu.TextureDesc) !Texture {
             .texture = self.texture,
             .dimension = desc.kind,
             .kind = .rtv,
-            .format = desc.format,
+            .format = fixed_format,
             .layer_num = desc.layer_num,
             .mip_num = desc.mip_num,
         });
@@ -53,7 +57,7 @@ pub fn init(allocator: std.mem.Allocator, desc: ila.gpu.TextureDesc) !Texture {
             .texture = self.texture,
             .dimension = desc.kind,
             .kind = .uav,
-            .format = desc.format,
+            .format = fixed_format,
             .layer_num = desc.layer_num,
             .mip_num = desc.mip_num,
         });

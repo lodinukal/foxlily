@@ -262,6 +262,8 @@
 //
 // ==============================================================================
 
+pub const enable_cross_platform_determinism = false;
+
 // Fundamental types
 pub const F32x4 = @Vector(4, f32);
 pub const F32x8 = @Vector(8, f32);
@@ -1482,7 +1484,7 @@ test "zmath.modAngle" {
 
 pub inline fn mulAdd(v0: anytype, v1: anytype, v2: anytype) @TypeOf(v0, v1, v2) {
     const T = @TypeOf(v0, v1, v2);
-    if (@import("zmath_options").enable_cross_platform_determinism) {
+    if (enable_cross_platform_determinism) {
         return v0 * v1 + v2; // Compiler will generate mul, add sequence (no fma even if the target supports it).
     } else {
         if (cpu_arch == .x86_64 and has_avx and has_fma) {
@@ -2114,7 +2116,7 @@ fn mulRetType(comptime Ta: type, comptime Tb: type) type {
     } else if ((Ta == Vec and Tb == Mat) or (Ta == Mat and Tb == Vec)) {
         return Vec;
     }
-    @compileError("zmath.mul() not implemented for types: " ++ @typeName(Ta) ++ @typeName(Tb));
+    @compileError("zmath.mul() not implemented for types: " ++ @typeName(Ta) ++ " " ++ @typeName(Tb));
 }
 
 pub fn mul(a: anytype, b: anytype) mulRetType(@TypeOf(a), @TypeOf(b)) {
