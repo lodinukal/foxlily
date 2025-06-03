@@ -130,7 +130,15 @@ pub fn tick(app: *App) AppError!void {
         };
         // const aspect_ratio = frame_constants.frame_size[0] / frame_constants.frame_size[1];
         // frame_constants.projection = ila.math.orthographicLh(aspect_ratio * 1000, 1.0 * 1000, 0.01, 1000);
-        frame_constants.projection = ila.math.orthographicLh(frame_constants.frame_size[0], frame_constants.frame_size[1], 0.01, 10000);
+        // frame_constants.projection = ila.math.orthographicLh(frame_constants.frame_size[0], frame_constants.frame_size[1], 0.01, 10000);
+        frame_constants.projection = ila.math.orthographicOffCenterLh(
+            0,
+            frame_constants.frame_size[0],
+            frame_constants.frame_size[1],
+            0,
+            0.0,
+            10000,
+        );
 
         frame_constants.view = ila.math.lookAtLh(.{ 0.0, 0.0, 0.0, 0.0 }, .{ 0.0, 0.0, 1, 0.0 }, .{ 0.0, 1.0, 0.0, 0.0 });
         frame_constants.model = ila.math.identity();
@@ -145,11 +153,9 @@ pub fn tick(app: *App) AppError!void {
         app.context.beginRendering();
         defer app.context.endRendering();
 
-        app.batch2d.associateCommandBuffer(cmd);
-        defer app.batch2d.flush();
+        defer app.batch2d.flush(cmd);
 
         const swaying_x = std.math.sin(app.running_time);
-        // std.debug.print("swaying_x: {}\n", .{swaying_x});
 
         app.batch2d.drawQuad(.{
             .position = .{ 500, 250, 10 },
@@ -183,7 +189,7 @@ pub fn tick(app: *App) AppError!void {
                 app.batch2d.drawQuad(.{
                     .position = .{ 100 + r_f * 10.0, 100 + g_f * 10.0, 5 },
                     .anchor = .{ 0.5, 0.5 },
-                    .rotation = 0,
+                    .rotation = swaying_x * std.math.pi * 0.5,
                     .size = .{ 8, 8 },
                     .color = .{ r_f / 90, g_f / 90, 0, 1 }, // white color
                     .texture_index = 2, // use the third texture in the resource set

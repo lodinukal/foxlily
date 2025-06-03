@@ -22,9 +22,9 @@ struct vertex_to_pixel
 
 struct Constants
 {
-    float4x4 projection_matrix;
-    float4x4 view_matrix;
-    float4x4 model_matrix;
+    row_major float4x4 projection_matrix;
+    row_major float4x4 view_matrix;
+    row_major float4x4 model_matrix;
     float2 viewport_size;
 };
 

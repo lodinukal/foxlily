@@ -29,8 +29,6 @@ max_vertices_per_flush: u32 = 0, // max_quads_per_flush * 6
 pipeline_layout: *ila.gpu.PipelineLayout = undefined,
 pipeline: *ila.gpu.Pipeline = undefined,
 
-cmd: ?*ila.gpu.CommandBuffer = null,
-
 pub const Vertex = extern struct {
     position: [3]f32, // x, y, z, z is zindex for depth sorting
     color: [4]f32, // r, g, b
@@ -118,10 +116,6 @@ pub fn deinit(self: *Batch2D) void {
     self.pipeline_layout = undefined;
 }
 
-pub fn associateCommandBuffer(self: *Batch2D, cmd: *ila.gpu.CommandBuffer) void {
-    self.cmd = cmd;
-}
-
 pub fn reset(self: *Batch2D) void {
     self.filling_set = 0;
 
@@ -131,15 +125,17 @@ pub fn reset(self: *Batch2D) void {
 }
 
 /// cmd should be in a graphics command buffer state
-pub fn flush(self: *Batch2D) void {
+pub fn flush(self: *Batch2D, cmd: *ila.gpu.CommandBuffer) void {
+    self.draw(cmd);
+    self.reset();
+}
+
+/// cmd should be in a graphics command buffer state
+/// should be using `flush` if this is the last in a frame
+pub fn draw(self: *Batch2D, cmd: *ila.gpu.CommandBuffer) void {
     if (self.filling_set == 0 and self.vertices.items[0].len == 0) {
-        std.log.warn("Batch2D flush called with no vertices", .{});
         return;
     }
-    const cmd = self.cmd orelse {
-        std.log.err("Batch2D flush called without associated command buffer", .{});
-        return;
-    };
 
     cmd.setPipelineLayout(self.pipeline_layout);
     cmd.setPipeline(self.pipeline);
@@ -149,8 +145,6 @@ pub fn flush(self: *Batch2D) void {
         const num_vertices: u64 = @divExact(buffer.len, @sizeOf(Vertex));
         cmd.draw(.{ .vertex_num = @intCast(num_vertices) });
     }
-
-    self.reset();
 }
 
 pub fn newDraw(self: *Batch2D) !void {
@@ -216,13 +210,8 @@ pub fn drawQuad(
         0.0,
         0.0,
     };
-    const viewport = self.context.viewport();
-    const position: math.Vec = .{
-        desc.position[0] - viewport.width / 2,
-        desc.position[1] - viewport.height / 2,
-        1000 - desc.position[2], // z-index
-        0.0, // w-component, not used in 2D
-    };
+
+    const position: math.Vec = math.loadArr3(desc.position);
     var top_left: math.Vec = undefined;
     var top_right: math.Vec = undefined;
     var bottom_left: math.Vec = undefined;
