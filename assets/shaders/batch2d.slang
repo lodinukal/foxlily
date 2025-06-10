@@ -102,7 +102,15 @@ fragment_out fragment(in vertex_to_pixel IN)
     if (is_text)
     {
         sdf_distance_outside = 0.5 - average(texture_pixel.r, texture_pixel.g, texture_pixel.b); // Use average of RGB channels for SDF distance
-        texture_pixel = float4(1.0, 1.0, 1.0, 1.0);                                              // Set texture pixel to white for SDF textures
+        float2 ddist = float2(ddx(sdf_distance_outside), ddy(sdf_distance_outside));
+        float pixel_dist = sdf_distance_outside / length(ddist);
+        texture_pixel = float4(1.0, 1.0, 1.0, 1.0); // Set texture pixel to white for SDF textures
+        float opacity = saturate(0.5 - sdf_distance_outside);
+        if (opacity < 0.01)
+            discard;
+        OUT.color = float4(IN.color.rgb, IN.color.a * opacity); // Use the calculated opacity for the color
+
+        return OUT; // Return early for SDF textures
     }
     else
     {

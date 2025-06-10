@@ -170,12 +170,14 @@ pub fn tick(app: *App) AppError!void {
 
         const swaying_x = std.math.sin(app.running_time);
 
+        // const hsl color calculation
+
         app.batch2d.drawText(.{
             .font_atlas = &app.roboto_font_atlas,
             .font_image_index = app.roboto_font_atlas_id,
             .string = "The quick brown fox jumps over the lazy dog",
             .position = .{ 50, 50, 1 }, // center of the screen
-            .color = .{ 1, 1, 1, 1 }, // white color
+            .color = .{ @mod(swaying_x, 1), @mod(swaying_x + 0.5, 1), @mod(swaying_x - 0.2, 1), 1 }, // white color
             .stroke_width = 0.5,
             .stroke_color = .{ 0.2, 0.2, 0.6, 1 }, // red stroke
         });
