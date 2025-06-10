@@ -541,6 +541,7 @@ pub const Format = enum(u32) {
 
     pub fn stride(format: Format) u32 {
         return switch (format) {
+            .unknown => 0,
             .R8 => 1,
             .RG8 => 2,
             .D32, .D24S8 => 4,
@@ -550,10 +551,12 @@ pub const Format = enum(u32) {
             .RG16F => 4,
             .R16F, .R16 => 2,
             .R32F, .R32UI => 4,
+            .RG16 => 4,
             .RG32F => 8,
             .RGB32F => 12,
+            .RGBA32F => 16,
             .BC1, .BC2, .BC3, .BC4, .BC5 => 8,
-            else => 0,
+            .R11G11B10F => 4,
         };
     }
 

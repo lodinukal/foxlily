@@ -19,6 +19,9 @@ const App = struct {
     context: ila.render.Context,
     batch2d: ila.render.Batch2D,
 
+    roboto_font_atlas: ila.Resource.FontAtlas = undefined,
+    roboto_font_atlas_texture: ila.render.Texture = undefined,
+    roboto_font_atlas_id: u32 = undefined,
     pukeko_image: ila.Resource.Image = undefined,
     pukeko_texture: ila.render.Texture = undefined,
     accumulated_time: i128 = 0,
@@ -68,6 +71,31 @@ pub fn init(app_state: **App, args: []const [*:0]const u8) AppError!void {
     try app.batch2d.init(8192); // 8192 quads
     errdefer app.batch2d.deinit();
 
+    // Load a font atlas
+    app.roboto_font_atlas = ila.Resource.FontAtlas.loadTTFFromPath(
+        app.allocator,
+        "assets/fonts/Roboto.ttf",
+        1024,
+        1024,
+        100,
+    ) catch |err| {
+        std.log.info("could not load roboto font atlas: {}", .{err});
+        return error.Unknown;
+    };
+
+    app.roboto_font_atlas.image.writeToFile("roboto_font_atlas.png", .png) catch |err| {
+        std.log.info("could not write roboto font atlas to file: {}", .{err});
+        return error.Unknown;
+    };
+
+    app.roboto_font_atlas_texture = ila.render.Texture.fromImage(app.allocator, .{
+        .context = &app.context,
+        .image = &app.roboto_font_atlas.image,
+    }) catch |err| {
+        std.log.info("could not create roboto font atlas texture: {}", .{err});
+        return err;
+    };
+
     // Load an image asset
     app.pukeko_image = ila.Resource.Image.loadFromPath(app.allocator, "assets/images/pukeko.jpg") catch |err| {
         std.log.info("could not load pukeko image: {}", .{err});
@@ -87,6 +115,11 @@ pub fn init(app_state: **App, args: []const [*:0]const u8) AppError!void {
         return err;
     };
 
+    app.roboto_font_atlas_id = app.context.resources.addTexture(app.roboto_font_atlas_texture.srv.?) catch |err| {
+        std.log.info("could not add roboto font atlas in main set: {}", .{err});
+        return err;
+    };
+
     for (args) |arg| {
         std.log.info("arg: {s}", .{arg});
     }
@@ -95,6 +128,8 @@ pub fn init(app_state: **App, args: []const [*:0]const u8) AppError!void {
 pub fn deinit(app: *App, _: sdl.c.SDL_AppResult) void {
     app.pukeko_image.deinit();
     app.pukeko_texture.deinit();
+    app.roboto_font_atlas.deinit();
+    app.roboto_font_atlas_texture.deinit();
 
     app.batch2d.deinit();
     app.context.deinit();
@@ -108,7 +143,7 @@ pub fn deinit(app: *App, _: sdl.c.SDL_AppResult) void {
 
 pub fn tick(app: *App) AppError!void {
     // const window_vp = app.context.viewport();
-    const window_rect = app.context.rect();
+    // const window_rect = app.context.rect();
 
     const this_delta = if (app.context.previous_frame_time < std.time.ns_per_s / 2)
         @as(f64, @floatFromInt(app.context.previous_frame_time)) / (std.time.ns_per_s * 1.0)
@@ -123,28 +158,6 @@ pub fn tick(app: *App) AppError!void {
     }
 
     {
-        const frame_constants = app.context.resources.frameConstants(app.context.backbuffer_index);
-        frame_constants.frame_size = .{
-            @floatFromInt(window_rect.width),
-            @floatFromInt(window_rect.height),
-        };
-        // const aspect_ratio = frame_constants.frame_size[0] / frame_constants.frame_size[1];
-        // frame_constants.projection = ila.math.orthographicLh(aspect_ratio * 1000, 1.0 * 1000, 0.01, 1000);
-        // frame_constants.projection = ila.math.orthographicLh(frame_constants.frame_size[0], frame_constants.frame_size[1], 0.01, 10000);
-        frame_constants.projection = ila.math.orthographicOffCenterLh(
-            0,
-            frame_constants.frame_size[0],
-            frame_constants.frame_size[1],
-            0,
-            0.0,
-            10000,
-        );
-
-        frame_constants.view = ila.math.lookAtLh(.{ 0.0, 0.0, 0.0, 0.0 }, .{ 0.0, 0.0, 1, 0.0 }, .{ 0.0, 1.0, 0.0, 0.0 });
-        frame_constants.model = ila.math.identity();
-    }
-
-    {
         const cmd = try app.context.beginFrame();
         defer app.context.endFrame() catch |err| std.debug.panic("context.endFrame failed: {}", .{err});
 
@@ -153,21 +166,46 @@ pub fn tick(app: *App) AppError!void {
         app.context.beginRendering();
         defer app.context.endRendering();
 
-        defer app.batch2d.flush(cmd);
+        defer app.batch2d.flush(cmd, .ui);
 
         const swaying_x = std.math.sin(app.running_time);
+
+        app.batch2d.drawText(.{
+            .font_atlas = &app.roboto_font_atlas,
+            .font_image_index = app.roboto_font_atlas_id,
+            .string = "The quick brown fox jumps over the lazy dog",
+            .position = .{ 50, 50, 1 }, // center of the screen
+            .color = .{ 1, 1, 1, 1 }, // white color
+            .stroke_width = 0.5,
+            .stroke_color = .{ 0.2, 0.2, 0.6, 1 }, // red stroke
+        });
 
         app.batch2d.drawQuad(.{
             .position = .{ 500, 250, 10 },
             .anchor = .{ 0.5, 0.5 },
-            .rotation = swaying_x * std.math.pi * 0.5,
+            .rotation = 0,
             .size = .{ 400, 400 },
             .color = .{ 1, 1, 1, 1 }, // white color
-            .texture_index = 2, // use the third texture in the resource set
+            .texture_index = app.roboto_font_atlas_id, // use the third texture in the resource set
             .border_width = 0.1,
             .border_color = .{ 0.2, 0.2, 0.6, 1 }, // red border
             .corner_radius = 0.2, // rounded corners
+            .flags = .{ .is_sdf = true },
+            .uv_top_left = .{ 0, 0.03 },
+            .uv_bottom_right = .{ 0.01, 0.03 },
         });
+
+        // app.batch2d.drawQuad(.{
+        //     .position = .{ 500, 250, 10 },
+        //     .anchor = .{ 0.5, 0.5 },
+        //     .rotation = swaying_x * std.math.pi * 0.5,
+        //     .size = .{ 400, 400 },
+        //     .color = .{ 1, 1, 1, 1 }, // white color
+        //     .texture_index = 2, // use the third texture in the resource set
+        //     .border_width = 0.1,
+        //     .border_color = .{ 0.2, 0.2, 0.6, 1 }, // red border
+        //     .corner_radius = 0.2, // rounded corners
+        // });
 
         app.batch2d.drawQuad(.{
             .position = .{ 150, 0, 30 }, // slightly behind the first quad
@@ -182,16 +220,16 @@ pub fn tick(app: *App) AppError!void {
         });
 
         // draw a grid of them
-        for (0..200) |r| {
-            for (0..90) |g| {
+        for (0..30) |r| {
+            for (0..10) |g| {
                 const r_f: f32 = @floatFromInt(r);
                 const g_f: f32 = @floatFromInt(g);
                 app.batch2d.drawQuad(.{
-                    .position = .{ 100 + r_f * 10.0, 100 + g_f * 10.0, 5 },
+                    .position = .{ 100 + r_f * 50.0, 100 + g_f * 50.0, 25 },
                     .anchor = .{ 0.5, 0.5 },
                     .rotation = swaying_x * std.math.pi * 0.5,
-                    .size = .{ 8, 8 },
-                    .color = .{ r_f / 90, g_f / 90, 0, 1 }, // white color
+                    .size = .{ 40, 40 },
+                    .color = .{ r_f / 30, g_f / 10, 0, 1 }, // white color
                     .texture_index = 2, // use the third texture in the resource set
                     .corner_radius = 0.2, // rounded corners
                 });

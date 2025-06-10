@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) void {
     const sdl_dll_install_step = b.addInstallArtifact(sdl_lib, .{ .h_dir = .disabled });
     b.getInstallStep().dependOn(&sdl_dll_install_step.step);
 
-    const zstbi_dep = b.dependency("zstbi", .{
+    const zstb_dep = b.dependency("stb", .{
         .target = target,
         .optimize = .ReleaseFast,
     });
@@ -41,7 +41,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "zstbi", .module = zstbi_dep.module("root") },
+            .{ .name = "stb", .module = zstb_dep.module("zstb") },
         },
     });
     lib_mod.addOptions("config", options);

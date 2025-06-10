@@ -988,9 +988,9 @@ pub fn setViewports(cmd: *gpu.CommandBuffer, viewports: []const gpu.Viewport) vo
     for (viewports, 0..) |v, i| {
         d3d_viewports[i] = .{
             .TopLeftX = v.x,
-            .TopLeftY = if (v.origin_bottom_left) v.y + v.height else v.y,
+            .TopLeftY = if (v.origin_bottom_left) v.y else v.y + v.height,
             .Width = v.width,
-            .Height = if (v.origin_bottom_left) -v.height else v.height,
+            .Height = if (v.origin_bottom_left) v.height else -v.height,
             .MinDepth = v.min_depth,
             .MaxDepth = v.max_depth,
         };

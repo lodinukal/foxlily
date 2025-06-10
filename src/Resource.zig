@@ -6,7 +6,7 @@ pub const Image = @import("resource/Image.zig");
 pub const Mesh = @import("resource/Mesh.zig");
 pub const Model = @import("resource/Model.zig");
 pub const Shader = @import("resource/Shader.zig");
-pub const Font = @import("resource/Font.zig");
+pub const FontAtlas = @import("resource/FontAtlas.zig");
 
 pub const Handle = enum(u64) {
     null = std.math.maxInt(u64),
@@ -26,7 +26,7 @@ pub const Kind = enum(u8) {
     /// ila's representation of a shader (a collection of shader stages for different targets)
     shader,
     /// ila's representation of a font (contains glyphs and metadata for rendering text)
-    font,
+    font_atlas,
 };
 
 pub const Any = union(Kind) {
@@ -36,7 +36,7 @@ pub const Any = union(Kind) {
     mesh: Mesh,
     model: Model,
     shader: Shader,
-    font: Font,
+    font_atlas: FontAtlas,
 
     pub fn deinit(self: Any) void {
         switch (self) {
@@ -46,7 +46,7 @@ pub const Any = union(Kind) {
             .mesh => {}, // TODO: Implement when Mesh.deinit is available
             .model => {}, // TODO: Implement when Model.deinit is available
             .shader => {}, // TODO: Implement when Shader.deinit is available
-            .font => {}, // TODO: Implement when Font.deinit is available
+            .font_atlas => {}, // TODO: Implement when FontAtlas.deinit is available
         }
     }
 };

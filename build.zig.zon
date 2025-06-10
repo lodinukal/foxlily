@@ -54,9 +54,8 @@
             .url = "git+https://github.com/InKryption/SPIRV-Cross.git#0a7784f0eaeecfcafe8c59cd4f8096c56ff093e8",
             .hash = "spirv_cross-1.4.309-bvxN_HT1LgAd0LxYuPDkGrU0_Tl_MBNQ9iGSpZj73a0D",
         },
-        .zstbi = .{
-            .url = "git+https://github.com/zig-gamedev/zstbi.git#094c4bba5cdbec167d3f6aaa98cccccd5c99145f",
-            .hash = "zstbi-0.11.0-dev-L0Ea_-eVBwCl8RYA98PhLDw3Fhw5k7FJOHSMDKWDOvqx",
+        .stb = .{
+            .path = "external/stb",
         },
     },
     .paths = .{

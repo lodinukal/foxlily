@@ -177,15 +177,23 @@ pub fn frameConstantsSet(self: *Shared, frame_index: usize) *ila.gpu.ResourceSet
     return self.shared_constant_sets[frame_index];
 }
 
+pub fn currentFrameConstantsSet(self: *Shared) *ila.gpu.ResourceSet {
+    return self.frameConstantsSet(self.context.backbuffer_index);
+}
+
 pub fn frameConstants(self: *Shared, frame_index: usize) *align(1) Constants {
     return &self.mapped_constants[frame_index];
 }
 
-pub fn addTexture(self: *Shared, texture: *ila.gpu.Resource) !usize {
+pub fn currentFrameConstants(self: *Shared) *align(1) Constants {
+    return self.frameConstants(self.context.backbuffer_index);
+}
+
+pub fn addTexture(self: *Shared, texture: *ila.gpu.Resource) !u32 {
     const index = self.highest_bound_texture;
     try self.setTexture(index, texture);
     self.highest_bound_texture += 1;
-    return index;
+    return @intCast(index);
 }
 
 pub fn setTexture(self: *Shared, index: usize, texture: ?*ila.gpu.Resource) !void {

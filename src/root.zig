@@ -104,15 +104,15 @@ pub fn setGpuInitDesc(desc: gpu.InitDesc) void {
     gpu_init = desc;
 }
 
-const zstbi = @import("zstbi");
+const stb = @import("stb");
 pub fn init(allocator: std.mem.Allocator) !void {
-    zstbi.init(allocator);
+    stb.init(allocator);
     try gpu.init(gpu_init orelse .{ .allocator = allocator });
 }
 
 pub fn deinit() void {
     gpu.deinit();
-    zstbi.deinit();
+    stb.deinit();
 }
 
 comptime {
@@ -123,4 +123,5 @@ comptime {
     _ = gpu;
     _ = media;
     _ = util;
+    _ = math;
 }

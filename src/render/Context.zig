@@ -337,7 +337,13 @@ pub fn beginRenderingToAttachments(self: *Context, attachments: []const *ila.gpu
     cmd.clearAttachment(.depth(1.0), window_rect);
     // cmd.setDepthBounds(0.0, 1.0);
     cmd.setResourceSet(self.resources.resource_set, 0);
-    cmd.setResourceSet(self.resources.frameConstantsSet(self.backbuffer_index), 1);
+    cmd.setResourceSet(self.resources.currentFrameConstantsSet(), 1);
+
+    const current_frame_constants = self.resources.frameConstants(self.backbuffer_index);
+    current_frame_constants.frame_size = .{
+        @floatFromInt(window_rect.width),
+        @floatFromInt(window_rect.height),
+    };
 }
 
 pub fn endRendering(self: *Context) void {
