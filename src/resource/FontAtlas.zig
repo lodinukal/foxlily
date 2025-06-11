@@ -5,7 +5,7 @@ const FontAtlas = @This();
 const ila = @import("../root.zig");
 
 const stb = @import("stb");
-const msdf = @import("msdf");
+const msdfc = @import("msdfc");
 
 allocator: std.mem.Allocator,
 char_info: []stb.TrueType.packedchar = &.{},
@@ -13,13 +13,13 @@ text_size: u32 = 0,
 font_size: f32 = 0,
 image: ila.Resource.Image = .{},
 
-pub fn loadFromData(allocator: std.mem.Allocator, data: []const u8, width: u32, height: u32, size: f32) !FontAtlas {
-    var out_image: ila.Resource.Image = try .initResolution(allocator, width, height, .RGBA8);
+pub fn loadFromData(allocator: std.mem.Allocator, data: []const u8, width: u32, height: u32) !FontAtlas {
+    var out_image: ila.Resource.Image = try .initResolution(allocator, width, height, .RGBA32F);
     errdefer out_image.deinit();
     const slice: []u8 = out_image.data.slice() orelse unreachable;
-    @memset(slice, 0);
+    const slice_floats: []align(1) f32 = std.mem.bytesAsSlice(f32, slice);
+    @memset(slice_floats, 1.0);
 
-    _ = size;
     const font_index = 0;
     const padding = 2;
 
@@ -101,12 +101,12 @@ pub fn loadFromData(allocator: std.mem.Allocator, data: []const u8, width: u32, 
                 &x1,
                 &y1,
             );
-            rect_pointer.w = @intCast(x1 - x0 + padding * 2);
-            rect_pointer.h = @intCast(y1 - y0 + padding * 2);
+            rect_pointer.w = @intCast(x1 - x0);
+            rect_pointer.h = @intCast(y1 - y0);
 
             packedchar_pointer.xoff = @floatFromInt(x0);
-            packedchar_pointer.yoff = @floatFromInt(-y0 - rect_pointer.h);
-            packedchar_pointer.xoff2 = @floatFromInt(x0 + rect_pointer.w);
+            packedchar_pointer.yoff = @floatFromInt(-y0 - (y1 - y0));
+            packedchar_pointer.xoff2 = @floatFromInt(x0 + (x1 - x0));
             packedchar_pointer.yoff2 = @floatFromInt(-y0);
 
             num_rects_using += 1;
@@ -137,39 +137,103 @@ pub fn loadFromData(allocator: std.mem.Allocator, data: []const u8, width: u32, 
 
             const glyph_index = stb.TrueType.FindGlyphIndex(&font_info, @intCast(codepoint));
 
-            // alternative, render the shape to an sdf with stbtt
-            var sdf_width: c_int = 0;
-            var sdf_height: c_int = 0;
-            var sdf_xoff: c_int = 0;
-            var sdf_yoff: c_int = 0;
-            const stb_sdf = stb.TrueType.GetGlyphSDF(
-                &font_info,
-                scale_with_padding,
-                glyph_index,
-                padding,
-                255,
-                127.5,
-                &sdf_width,
-                &sdf_height,
-                &sdf_xoff,
-                &sdf_yoff,
-            );
-            defer stb.TrueType.FreeSDF(stb_sdf, null);
+            // msdf glyph
+            if (true) {
+                var metrics: msdfc.Metrics = undefined;
+                const opt_msdf = msdfc.ex_msdf_glyph(
+                    &font_info,
+                    @intCast(codepoint),
+                    @intCast(rect.w),
+                    @intCast(rect.h),
+                    &metrics,
+                    1, // autofit
+                );
+                const msdf = opt_msdf orelse {
+                    std.log.err("Failed to generate glyph for codepoint {d}", .{codepoint});
+                    continue;
+                };
+                defer msdfc.free_msdf_glyph(msdf);
 
-            const rx: usize = @intCast(rect.x);
-            const ry: usize = @intCast(rect.y);
-            const sdf_w: usize = @intCast(sdf_width);
-            const sdf_h: usize = @intCast(sdf_height);
-            for (0..sdf_h) |y| {
-                for (0..sdf_w) |x| {
-                    const idx: usize = (x + y * sdf_w);
-                    const idx_4_channel: usize = ((x + rx) + (y + ry) * width) * 4;
+                std.debug.print("Packed char {d}: x0: {d}, y0: {d}, x1: {d}, y1: {d}\n", .{
+                    codepoint, packedchar_ptr.x0, packedchar_ptr.y0, packedchar_ptr.x1, packedchar_ptr.y1,
+                });
 
-                    const pixel_value: u8 = stb_sdf[idx];
-                    slice[idx_4_channel] = pixel_value; // R
-                    slice[idx_4_channel + 1] = pixel_value; // G
-                    slice[idx_4_channel + 2] = pixel_value; // B
-                    slice[idx_4_channel + 3] = 0xFF;
+                //                   chardata[i].x0 = (stbtt_int16) x;
+                //   chardata[i].y0 = (stbtt_int16) y;
+                //   chardata[i].x1 = (stbtt_int16) (x + gw);
+                //   chardata[i].y1 = (stbtt_int16) (y + gh);
+                //   chardata[i].xadvance = scale * advance;
+                //   chardata[i].xoff     = (float) x0;
+                //   chardata[i].yoff     = (float) y0;
+
+                // packedchar_ptr.xoff = @floatFromInt(metrics.ix0);
+                // packedchar_ptr.yoff = @floatFromInt(-metrics.iy1 - rect.h);
+                // packedchar_ptr.xoff2 = @floatFromInt(metrics.ix1 + rect.w);
+                // packedchar_ptr.yoff2 = @floatFromInt(-metrics.iy0);
+                // packedchar_ptr.x0 = @intCast(rect.x);
+                // packedchar_ptr.y0 = @intCast(rect.y + rect.h);
+                // packedchar_ptr.x1 = @intCast(rect.x + rect.w);
+                // packedchar_ptr.y1 = @intCast(rect.y);
+                // packedchar_ptr.xadvance = @floatFromInt(metrics.advance);
+
+                const rx: usize = @intCast(rect.x);
+                const ry: usize = @intCast(rect.y);
+                const msdf_w: usize = @intCast(rect.w);
+                const msdf_h: usize = @intCast(rect.h);
+                for (0..msdf_h) |y| {
+                    for (0..msdf_w) |x| {
+                        const idx: usize = (x + y * msdf_w) * 3;
+                        const idx_4_channel: usize = ((x + rx) + (y + ry) * width) * 4;
+
+                        const red_float: f32 = msdf[idx];
+                        const green_float: f32 = msdf[idx + 1];
+                        const blue_float: f32 = msdf[idx + 2];
+
+                        slice_floats[idx_4_channel] = red_float; // R
+                        slice_floats[idx_4_channel + 1] = green_float; // G
+                        slice_floats[idx_4_channel + 2] = blue_float; // B
+                        slice_floats[idx_4_channel + 3] = 0xFF;
+                    }
+                }
+            }
+
+            // stb glyph sdfs
+            if (false) {
+
+                // alternative, render the shape to an sdf with stbtt
+                var sdf_width: c_int = 0;
+                var sdf_height: c_int = 0;
+                var sdf_xoff: c_int = 0;
+                var sdf_yoff: c_int = 0;
+                const stb_sdf = stb.TrueType.GetGlyphSDF(
+                    &font_info,
+                    scale_with_padding,
+                    glyph_index,
+                    padding,
+                    255,
+                    127.5,
+                    &sdf_width,
+                    &sdf_height,
+                    &sdf_xoff,
+                    &sdf_yoff,
+                );
+                defer stb.TrueType.FreeSDF(stb_sdf, null);
+
+                const rx: usize = @intCast(rect.x);
+                const ry: usize = @intCast(rect.y);
+                const sdf_w: usize = @intCast(sdf_width);
+                const sdf_h: usize = @intCast(sdf_height);
+                for (0..sdf_h) |y| {
+                    for (0..sdf_w) |x| {
+                        const idx: usize = (x + y * sdf_w);
+                        const idx_4_channel: usize = ((x + rx) + (y + ry) * width) * 4;
+
+                        const pixel_value: u8 = stb_sdf[idx];
+                        slice[idx_4_channel] = pixel_value; // R
+                        slice[idx_4_channel + 1] = pixel_value; // G
+                        slice[idx_4_channel + 2] = pixel_value; // B
+                        slice[idx_4_channel + 3] = 0xFF;
+                    }
                 }
             }
         }
@@ -195,7 +259,7 @@ fn mapRange(
     return (value - in_min) / (in_max - in_min) * (out_max - out_min) + out_min;
 }
 
-pub fn loadTTFFromPath(allocator: std.mem.Allocator, path: []const u8, width: u32, height: u32, size: f32) !FontAtlas {
+pub fn loadTTFFromPath(allocator: std.mem.Allocator, path: []const u8, width: u32, height: u32) !FontAtlas {
     const file = std.fs.cwd().openFile(path, .{}) catch return error.FileNotFound;
     defer file.close();
 
@@ -208,7 +272,6 @@ pub fn loadTTFFromPath(allocator: std.mem.Allocator, path: []const u8, width: u3
         font_mem,
         width,
         height,
-        size,
     );
 }
 

@@ -19,6 +19,11 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseFast,
     });
 
+    const msdfc_dep = b.dependency("msdfc", .{
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+
     const tag = target.result.os.tag;
     const d3d12_option = b.option(bool, "d3d12", "enables d3d12 backend in gpu module") orelse
         (tag == .windows);
@@ -42,6 +47,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "stb", .module = zstb_dep.module("zstb") },
+            .{ .name = "msdfc", .module = msdfc_dep.module("msdfc") },
         },
     });
     lib_mod.addOptions("config", options);

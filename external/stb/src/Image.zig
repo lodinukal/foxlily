@@ -12,6 +12,9 @@ pub const JpgWriteSettings = struct {
 pub const WriteFormat = union(enum) {
     png,
     jpg: JpgWriteSettings,
+    tga,
+    hdr,
+    bmp,
 };
 
 pub const WriteError = error{
@@ -266,7 +269,14 @@ pub fn writeToFile(
     const h = @as(c_int, @intCast(image.height));
     const comp = @as(c_int, @intCast(image.num_components));
     const result = switch (image_format) {
-        .png => stbi_write_png(filename.ptr, w, h, comp, image.data.ptr, 0),
+        .png => stbi_write_png(
+            filename.ptr,
+            w,
+            h,
+            comp,
+            image.data.ptr,
+            @intCast(image.bytes_per_row),
+        ),
         .jpg => |settings| stbi_write_jpg(
             filename.ptr,
             w,
@@ -274,6 +284,27 @@ pub fn writeToFile(
             comp,
             image.data.ptr,
             @as(c_int, @intCast(settings.quality)),
+        ),
+        .tga => stbi_write_tga(
+            filename.ptr,
+            w,
+            h,
+            comp,
+            image.data.ptr,
+        ),
+        .hdr => stbi_write_hdr(
+            filename.ptr,
+            w,
+            h,
+            comp,
+            @as([*]align(1) f32, @ptrCast(image.data.ptr)),
+        ),
+        .bmp => stbi_write_bmp(
+            filename.ptr,
+            w,
+            h,
+            comp,
+            image.data.ptr,
         ),
     };
     // if the result is 0 then it means an error occured (per stb image write docs)
@@ -304,6 +335,9 @@ pub fn writeToFn(
             image.data.ptr,
             @as(c_int, @intCast(settings.quality)),
         ),
+        .tga => stbi_write_tga_to_func(write_fn, context, w, h, comp, image.data.ptr),
+        .hdr => stbi_write_hdr_to_func(write_fn, context, w, h, comp, @as([*]f32, @ptrCast(image.data.ptr))),
+        .bmp => stbi_write_bmp_to_func(write_fn, context, w, h, comp, image.data.ptr),
     };
     // if the result is 0 then it means an error occured (per stb image write docs)
     if (result == 0) {
@@ -436,6 +470,30 @@ extern fn stbi_write_png(
     stride_in_bytes: c_int,
 ) c_int;
 
+extern fn stbi_write_tga(
+    filename: [*:0]const u8,
+    w: c_int,
+    h: c_int,
+    comp: c_int,
+    data: [*]const u8,
+) c_int;
+
+extern fn stbi_write_bmp(
+    filename: [*:0]const u8,
+    w: c_int,
+    h: c_int,
+    comp: c_int,
+    data: [*]const u8,
+) c_int;
+
+extern fn stbi_write_hdr(
+    filename: [*:0]const u8,
+    w: c_int,
+    h: c_int,
+    comp: c_int,
+    data: [*]align(1) const f32,
+) c_int;
+
 extern fn stbi_write_png_to_func(
     func: *const fn (?*anyopaque, ?*anyopaque, c_int) callconv(.C) void,
     context: ?*anyopaque,
@@ -454,6 +512,33 @@ extern fn stbi_write_jpg_to_func(
     comp: c_int,
     data: [*]const u8,
     quality: c_int,
+) c_int;
+
+extern fn stbi_write_tga_to_func(
+    func: *const fn (?*anyopaque, ?*anyopaque, c_int) callconv(.C) void,
+    context: ?*anyopaque,
+    x: c_int,
+    y: c_int,
+    comp: c_int,
+    data: [*]const u8,
+) c_int;
+
+extern fn stbi_write_hdr_to_func(
+    func: *const fn (?*anyopaque, ?*anyopaque, c_int) callconv(.C) void,
+    context: ?*anyopaque,
+    x: c_int,
+    y: c_int,
+    comp: c_int,
+    data: [*]const f32,
+) c_int;
+
+extern fn stbi_write_bmp_to_func(
+    func: *const fn (?*anyopaque, ?*anyopaque, c_int) callconv(.C) void,
+    context: ?*anyopaque,
+    x: c_int,
+    y: c_int,
+    comp: c_int,
+    data: [*]const u8,
 ) c_int;
 
 test "stbi image basic" {

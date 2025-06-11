@@ -6,7 +6,7 @@
     //
     // It is redundant to include "zig" in this name because it is already
     // within the Zig package namespace.
-    .name = .foxlily,
+    .name = .msdfc,
 
     // This is a [Semantic Version](https://semver.org/).
     // In a future version of Zig it will be used for package deduplication.
@@ -24,7 +24,7 @@
     // original project's identity. Thus it is recommended to leave the comment
     // on the following line intact, so that it shows up in code reviews that
     // modify the field.
-    .fingerprint = 0x936de5077bc5a3d2, // Changing this has security and trust implications.
+    .fingerprint = 0x76c8d4ac08adc319, // Changing this has security and trust implications.
 
     // Tracks the earliest Zig version that the package considers to be a
     // supported use case.
@@ -36,34 +36,14 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
-        .sdl = .{
-            .url = "git+https://github.com/castholm/SDL.git#fce122b6b1e963285b3359f95a1bfe876afc20a6",
-            .hash = "sdl-0.2.2+3.2.12-7uIn9EpsfgG_BF1uqSfix5rkc6EsZCZY35sQxAjVVO7a",
-        },
-        .zwindows = .{
-            .url = "git+https://github.com/zig-gamedev/zwindows.git#c29e0fec072c282a8c6234c5837db071af42a11f",
-            .hash = "zwindows-0.2.0-dev-xMZ1u9hgDABY0PTdtNQlpi3Gi06AP1BEGunM7fC9Mijw",
-            .lazy = true,
-        },
-        .d3d12ma = .{
-            .url = "git+https://github.com/lodinukal/d3d12ma#5361513570f104696e5a7de59904adf4f4b79df1",
-            .hash = "N-V-__8AAE6ESgCFTzK1zhBDBljTF8qhjntc8_NWcam3rCV2",
-            .lazy = true,
-        },
-        .spirv_cross = .{
-            .url = "git+https://github.com/InKryption/SPIRV-Cross.git#0a7784f0eaeecfcafe8c59cd4f8096c56ff093e8",
-            .hash = "spirv_cross-1.4.309-bvxN_HT1LgAd0LxYuPDkGrU0_Tl_MBNQ9iGSpZj73a0D",
-        },
         .stb = .{
-            .path = "external/stb",
-        },
-        .msdfc = .{
-            .path = "external/msdfc",
+            .path = "../stb",
         },
     },
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        "LICENSE",
         "src",
         // For example...
         //"LICENSE",

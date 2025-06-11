@@ -79,13 +79,14 @@ float sdRoundedBox(in float2 p, in float2 b, in float4 r)
 struct fragment_out
 {
     float4 color : SV_Target;
+    float depth : SV_Depth; // Depth value for the fragment, if needed
 };
 
 // mix function
 
-float average(float a, float b, float c)
+float median(float r, float g, float b)
 {
-    return (a + b + c) / 3.0f;
+    return max(min(r, g), min(max(r, g), b));
 }
 
 [shader("fragment")]
@@ -94,49 +95,56 @@ fragment_out fragment(in vertex_to_pixel IN)
     // sample the texture using the texcoord
 
     fragment_out OUT;
+    OUT.depth = IN.position.z / IN.position.w; // Calculate depth value for the fragment
 
     float softness = 0.01f;
     float4 texture_pixel = textures[NonUniformResourceIndex(IN.texture_index)].Sample(linear_sampler, float2(IN.real_texcoord.x, IN.real_texcoord.y));
     const bool is_text = (IN.flags & VERTEX_FLAG_TEXTURE_TEXT) != 0; // Check if the vertex uses SDF texture sampling
-    float sdf_distance_outside = 0.0f;                               // Initialize SDF distance outside
     if (is_text)
     {
-        sdf_distance_outside = 0.5 - average(texture_pixel.r, texture_pixel.g, texture_pixel.b); // Use average of RGB channels for SDF distance
+        float sdf_distance_outside = 0.5 - median(texture_pixel.r, texture_pixel.g, texture_pixel.b); // Use average of RGB channels for SDF distance
+
         float2 ddist = float2(ddx(sdf_distance_outside), ddy(sdf_distance_outside));
-        float pixel_dist = sdf_distance_outside / length(ddist);
-        texture_pixel = float4(1.0, 1.0, 1.0, 1.0); // Set texture pixel to white for SDF textures
-        float opacity = saturate(0.5 - sdf_distance_outside);
-        if (opacity < 0.01)
+        float pixel_dist = sdf_distance_outside / length(ddist); // Calculate pixel distance
+
+        const float epsilon = 1; // Small value to avoid division by zero
+        if (IN.border_width + epsilon < pixel_dist)
             discard;
-        OUT.color = float4(IN.color.rgb, IN.color.a * opacity); // Use the calculated opacity for the color
+        if (IN.border_width <= pixel_dist)
+        {
+            float4 falloff_color = IN.border_width == 0.0 ? IN.color : IN.border_color;
+            falloff_color.a = saturate(0.1 - pixel_dist);
+            OUT.color = falloff_color;
+            OUT.depth = 1;
+            return OUT; // Return early for SDF textures
+        }
+        bool in_border = 0.0 < pixel_dist && pixel_dist < IN.border_width;
+
+        OUT.color = in_border ? IN.border_color : IN.color;
 
         return OUT; // Return early for SDF textures
     }
     else
     {
+        // get the pixel size per texcoord
+        float2 size = float2(1.0, 1.0);
         // assume square box for non-SDF textures
         float2 center = IN.texcoord * 2.0 - 1.0; // Convert to range [-1, 1]
-        float2 size = float2(1, 1);              // Size of the box
-        sdf_distance_outside = sdRoundedBox(center, size, IN.corner_radius);
-    }
+        float sdf_distance_outside = sdRoundedBox(center, size, IN.corner_radius);
 
-    float sdf_distance_border = sdf_distance_outside + IN.border_width; // Distance for the border area
-    float smoothedAlpha = 1.0f - smoothstep(0.0f, softness * 2.0f, sdf_distance_outside);
-    // Outside the rounded box
+        if (sdf_distance_outside > 0.0f)
+        {
+            discard;
+        }
 
-    if (sdf_distance_outside > 0.0f)
-    {
-        discard;
-    }
+        if (sdf_distance_outside + IN.border_width > 0.0f)
+        {
+            float smooth_alpha = 1.0f - smoothstep(0.0f, softness * 2.0f, sdf_distance_outside);
+            OUT.color = IN.border_color * smooth_alpha; // Apply border color with alpha
+            return OUT;
+        }
 
-    if (sdf_distance_outside + IN.border_width > 0.0f)
-    {
-        // If inside the border area, return transparent
-        // return IN.border_color * smoothedAlpha; // Apply border color with alpha
-        OUT.color = IN.border_color * smoothedAlpha; // Apply border color with alpha
+        OUT.color = texture_pixel * IN.color; // Use the texture color multiplied by vertex color
         return OUT;
     }
-
-    OUT.color = texture_pixel * IN.color;
-    return OUT;
 };

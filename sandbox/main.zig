@@ -58,6 +58,7 @@ pub fn init(app_state: **App, args: []const [*:0]const u8) AppError!void {
         }),
         .context = try .fromWindow(app.allocator, app.window, .{
             .immediate = true,
+            .clear_color = .{ 1.0, 1.0, 1.0, 1.0 },
         }),
         .batch2d = .{
             .context = &app.context,
@@ -77,13 +78,12 @@ pub fn init(app_state: **App, args: []const [*:0]const u8) AppError!void {
         "assets/fonts/Roboto.ttf",
         1024,
         1024,
-        100,
     ) catch |err| {
         std.log.info("could not load roboto font atlas: {}", .{err});
         return error.Unknown;
     };
 
-    app.roboto_font_atlas.image.writeToFile("roboto_font_atlas.png", .png) catch |err| {
+    app.roboto_font_atlas.image.writeToFile("roboto_font_atlas.hdr", .hdr) catch |err| {
         std.log.info("could not write roboto font atlas to file: {}", .{err});
         return error.Unknown;
     };
@@ -175,27 +175,14 @@ pub fn tick(app: *App) AppError!void {
         app.batch2d.drawText(.{
             .font_atlas = &app.roboto_font_atlas,
             .font_image_index = app.roboto_font_atlas_id,
-            .string = "The quick brown fox jumps over the lazy dog",
+            .string = "gurt: yo",
             .position = .{ 50, 50, 1 }, // center of the screen
-            .color = .{ @mod(swaying_x, 1), @mod(swaying_x + 0.5, 1), @mod(swaying_x - 0.2, 1), 1 }, // white color
-            .stroke_width = 0.5,
-            .stroke_color = .{ 0.2, 0.2, 0.6, 1 }, // red stroke
-        });
-
-        app.batch2d.drawQuad(.{
-            .position = .{ 500, 250, 10 },
-            .anchor = .{ 0.5, 0.5 },
-            .rotation = 0,
-            .size = .{ 400, 400 },
             .color = .{ 1, 1, 1, 1 }, // white color
-            .texture_index = app.roboto_font_atlas_id, // use the third texture in the resource set
-            .border_width = 0.1,
-            .border_color = .{ 0.2, 0.2, 0.6, 1 }, // red border
-            .corner_radius = 0.2, // rounded corners
-            .flags = .{ .is_sdf = true },
-            .uv_top_left = .{ 0, 0.03 },
-            .uv_bottom_right = .{ 0.01, 0.03 },
+            .stroke_width = 2,
+            .stroke_color = .{ 0.2, 0.2, 0.6, 1 }, // red stroke
+            .scale = 1,
         });
+        // try app.batch2d.newDraw(.ui);
 
         // app.batch2d.drawQuad(.{
         //     .position = .{ 500, 250, 10 },
@@ -220,6 +207,7 @@ pub fn tick(app: *App) AppError!void {
             .border_width = 0.1,
             .corner_radius = 1,
         });
+        // try app.batch2d.newDraw(.ui);
 
         // draw a grid of them
         for (0..30) |r| {

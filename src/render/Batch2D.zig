@@ -94,8 +94,8 @@ pub fn init(self: *Batch, max_quads_per_flush: u32) !void {
         .op = .add,
     };
     const alpha_blend: ila.gpu.Blending = .{
-        .src = .src_alpha,
-        .dst = .one_minus_src_alpha,
+        .src = .zero,
+        .dst = .zero,
         .op = .add,
     };
     graphics_pipeline_desc.colorAttachments(&.{

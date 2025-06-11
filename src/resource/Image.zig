@@ -47,8 +47,8 @@ fn toStbImage(self: Image) !stb.Image {
         .height = self.height,
         .num_components = 4,
         .bytes_per_component = bytes_per_component,
-        .bytes_per_row = self.width * bytes_per_component,
-        .is_hdr = false,
+        .bytes_per_row = self.width * bytes_per_component * 4, // 4 components (RGBA)
+        .is_hdr = bytes_per_component > 1,
     };
 }
 
@@ -94,6 +94,9 @@ pub fn writeToFile(
     image_format: stb.Image.WriteFormat,
 ) !void {
     const image = try self.toStbImage();
+    if (image.is_hdr and image_format != .hdr) {
+        return error.InvalidImageFormat;
+    }
     if (filename.len >= std.fs.max_path_bytes) {
         return error.PathTooLong;
     }
