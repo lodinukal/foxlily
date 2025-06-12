@@ -2,3 +2,5 @@
 zig-out
 src/compiled_shaders
 sandbox/compiled_shaders
+
+roboto_font_atlas.hdr

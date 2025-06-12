@@ -58,13 +58,12 @@ pub fn init(app_state: **App, args: []const [*:0]const u8) AppError!void {
         }),
         .context = try .fromWindow(app.allocator, app.window, .{
             .immediate = true,
-            .clear_color = .{ 1.0, 1.0, 1.0, 1.0 },
+            .clear_color = .{ 0.91, 0.74, 0.52, 1.0 },
         }),
         .batch2d = .{
             .context = &app.context,
             .allocator = app.allocator,
         },
-        // .resources = .{ .allocator = gpa, .context = &app.context },
     };
     try app.context.start();
     errdefer app.context.deinit();
@@ -171,17 +170,6 @@ pub fn tick(app: *App) AppError!void {
         const swaying_x = std.math.sin(app.running_time);
 
         // const hsl color calculation
-
-        app.batch2d.drawText(.{
-            .font_atlas = &app.roboto_font_atlas,
-            .font_image_index = app.roboto_font_atlas_id,
-            .string = "gurt: yo",
-            .position = .{ 50, 50, 1 }, // center of the screen
-            .color = .{ 1, 1, 1, 1 }, // white color
-            .stroke_width = 2,
-            .stroke_color = .{ 0.2, 0.2, 0.6, 1 }, // red stroke
-            .scale = 1,
-        });
         // try app.batch2d.newDraw(.ui);
 
         // app.batch2d.drawQuad(.{
@@ -225,6 +213,19 @@ pub fn tick(app: *App) AppError!void {
                 });
             }
         }
+
+        // ui
+
+        app.batch2d.drawText(.{
+            .font_atlas = &app.roboto_font_atlas,
+            .font_image_index = app.roboto_font_atlas_id,
+            .string = "the quick brown fox\njumps over the lazy dog",
+            .position = .{ 50, 120, 1 }, // center of the screen
+            .color = .{ 1.0, 1.0, 1, 1 }, // white color
+            .stroke_width = (swaying_x) * 10,
+            .stroke_color = .{ 0.2, 0.2, 0.6, 1 }, // red stroke
+            .size = 90,
+        });
     }
 }
 

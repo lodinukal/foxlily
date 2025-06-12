@@ -104,23 +104,34 @@ fragment_out fragment(in vertex_to_pixel IN)
     {
         float sdf_distance_outside = 0.5 - median(texture_pixel.r, texture_pixel.g, texture_pixel.b); // Use average of RGB channels for SDF distance
 
-        float2 ddist = float2(ddx(sdf_distance_outside), ddy(sdf_distance_outside));
-        float pixel_dist = sdf_distance_outside / length(ddist); // Calculate pixel distance
+        const float px_range = 2.0;
+        float screen_px_range = 72 / 32 * px_range;
+
+        float screen_pixel_dist = screen_px_range * (sdf_distance_outside);
+
+        float opacity = saturate(screen_pixel_dist + 0.5);
+        // OUT.color = float4((screen_pixel_dist.xxx + 16.0) / 32.0, opacity);
+        // return OUT; // Return early for SDF textures
 
         const float epsilon = 1; // Small value to avoid division by zero
-        if (IN.border_width + epsilon < pixel_dist)
-            discard;
-        if (IN.border_width <= pixel_dist)
+        // if (IN.border_width + epsilon < pixel_dist)
+        //     discard;
+        if (IN.border_width + 0.5 <= screen_pixel_dist)
         {
             float4 falloff_color = IN.border_width == 0.0 ? IN.color : IN.border_color;
-            falloff_color.a = saturate(0.1 - pixel_dist);
+            falloff_color.a = opacity;
             OUT.color = falloff_color;
             OUT.depth = 1;
             return OUT; // Return early for SDF textures
         }
-        bool in_border = 0.0 < pixel_dist && pixel_dist < IN.border_width;
+        float4 border_color = IN.border_width == 0.0 ? IN.color : IN.border_color;
+        bool in_border = 0.5 < screen_pixel_dist && screen_pixel_dist < (IN.border_width + 0.5);
 
-        OUT.color = in_border ? IN.border_color : IN.color;
+        OUT.color = in_border ? border_color : IN.color;
+        if (OUT.color.a <= 0.5f)
+        {
+            OUT.depth = 1;
+        }
 
         return OUT; // Return early for SDF textures
     }

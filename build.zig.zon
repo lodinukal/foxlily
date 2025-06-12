@@ -57,8 +57,9 @@
         .stb = .{
             .path = "external/stb",
         },
-        .msdfc = .{
-            .path = "external/msdfc",
+        .msdfgen = .{
+            .url = "git+https://github.com/lodinukal/msdfgen.git#6867c7df8ecf90ce7dee0fa0d7f81e8e49700b97",
+            .hash = "msdfgen-1.12.1-Eg9verdCCQBr90qNg7rzUahz3mkPsggw8WsYBFwtLjJs",
         },
     },
     .paths = .{

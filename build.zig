@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseFast,
     });
 
-    const msdfc_dep = b.dependency("msdfc", .{
+    const msdfgen_dep = b.dependency("msdfgen", .{
         .target = target,
         .optimize = .ReleaseFast,
     });
@@ -47,7 +47,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "stb", .module = zstb_dep.module("zstb") },
-            .{ .name = "msdfc", .module = msdfc_dep.module("msdfc") },
+            .{ .name = "msdfgen", .module = msdfgen_dep.module("msdfgen") },
+            .{ .name = "msdfatlasgen", .module = msdfgen_dep.module("msdfatlasgen") },
         },
     });
     lib_mod.addOptions("config", options);

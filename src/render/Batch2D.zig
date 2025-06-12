@@ -208,7 +208,8 @@ pub const UITextDesc = struct {
 
     x: ?*f32 = null,
     y: ?*f32 = null,
-    scale: f32 = 1.0,
+    /// size in pixels
+    size: f32 = 1.0,
     position: [3]f32 = .{ 0, 0, 0 },
     color: [4]f32 = .{ 1, 1, 1, 1 }, // default white color
     stroke_width: f32 = 0.0, // width of the stroke, 0 means no stroke
@@ -225,14 +226,16 @@ pub fn drawText(self: *Batch, desc: UITextDesc) void {
     const y: *f32 = if (desc.y) |y| y else &temp_y;
 
     const origin_x: f32 = x.*;
-    for (desc.string) |char| {
+    var view = std.unicode.Utf8View.init(desc.string) catch return;
+    var iter = view.iterator();
+    while (iter.nextCodepoint()) |char| {
         if (char == '\n') {
             x.* = origin_x; // reset x to origin on newline
-            y.* += desc.font_atlas.font_size * desc.line_height_modifier; // move y down by scale
+            y.* -= (desc.size / desc.font_atlas.font_size) * desc.line_height_modifier; // move y down by scale
             continue;
         }
 
-        const quad = desc.font_atlas.getCharQuadMoving(char, x, y);
+        const quad = desc.font_atlas.getCharQuadMoving(char, desc.size, x, y);
         const position_top_left = quad.topLeft();
         // const aspect_ratio: f32 = quad.width() / quad.height();
         self.drawQuad(.{
@@ -243,7 +246,7 @@ pub fn drawText(self: *Batch, desc: UITextDesc) void {
             }, // use the center of the quad for position
             .anchor = .{ 0, 0 },
             .rotation = 0.0,
-            .size = .{ quad.width() * desc.scale, quad.height() * desc.scale }, // use the quad size
+            .size = .{ quad.width(), quad.height() }, // use the quad size
             .color = desc.color,
             .flags = .{ .is_sdf = true }, // use SDF texture
             .texture_index = desc.font_image_index, // use the font atlas texture
@@ -256,7 +259,7 @@ pub fn drawText(self: *Batch, desc: UITextDesc) void {
         x.* += desc.kerning;
     }
     x.* = origin_x;
-    y.* += desc.scale * desc.line_height_modifier;
+    y.* += (desc.size / desc.font_atlas.font_size) * desc.line_height_modifier;
 
     if (desc.x) |passed_x| passed_x.* = x.*;
     if (desc.y) |passed_y| passed_y.* = y.*;

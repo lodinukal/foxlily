@@ -4,259 +4,164 @@ const FontAtlas = @This();
 
 const ila = @import("../root.zig");
 
-const stb = @import("stb");
-const msdfc = @import("msdfc");
+const msdfgen = @import("msdfgen");
+const msdfatlasgen = @import("msdfatlasgen");
 
 allocator: std.mem.Allocator,
-char_info: []stb.TrueType.packedchar = &.{},
-text_size: u32 = 0,
+glyph_quads: []GlyphQuad = &.{},
 font_size: f32 = 0,
 image: ila.Resource.Image = .{},
+max_padding: u32 = 0,
+max_padding_scaled: f32 = 0,
 
 pub fn loadFromData(allocator: std.mem.Allocator, data: []const u8, width: u32, height: u32) !FontAtlas {
     var out_image: ila.Resource.Image = try .initResolution(allocator, width, height, .RGBA32F);
     errdefer out_image.deinit();
     const slice: []u8 = out_image.data.slice() orelse unreachable;
     const slice_floats: []align(1) f32 = std.mem.bytesAsSlice(f32, slice);
-    @memset(slice_floats, 1.0);
+    @memset(slice_floats, 0.0);
 
-    const font_index = 0;
-    const padding = 2;
+    const padding = 10;
 
-    var font_info: stb.TrueType.fontinfo = undefined;
-    const load_font_result = stb.TrueType.InitFont(
-        &font_info,
-        data.ptr,
-        stb.TrueType.GetFontOffsetForIndex(data.ptr, font_index),
-    );
-    if (load_font_result == 0) {
-        return error.LoadFontFailed;
-    }
+    const ft = try getFreetypeLib();
 
-    const ascii_first = 32;
-    const ascii_last = 126;
-    const num_codepoints = ascii_last - ascii_first + 1;
-    const rects = try allocator.alloc(stb.Rectpack.rect, num_codepoints);
-    errdefer allocator.free(rects);
-    const char_info = try allocator.alloc(
-        stb.TrueType.packedchar,
-        num_codepoints,
-    );
-    errdefer allocator.free(char_info);
+    const ft_font = ft.loadFontData(data) orelse {
+        std.log.err("Failed to load font data", .{});
+        return error.LoadFontDataFailed;
+    };
+    defer ft_font.deinit();
 
-    // pad by 3 as each pixel is 4 bytes (RGBA), but stbtt uses 1 byte per channel
-    var pack_context: stb.Rectpack.context = .{};
-    const nodes = try allocator.alloc(stb.Rectpack.node, width);
-    defer allocator.free(nodes);
-    stb.Rectpack.init_target(
-        &pack_context,
-        @intCast(width),
-        @intCast(height),
-        nodes.ptr,
-        @intCast(width),
-    );
+    const charset = msdfatlasgen.Charset.init() orelse {
+        std.log.err("Failed to create charset", .{});
+        return error.InitCharsetFailed;
+    };
+    defer charset.deinit();
 
-    const glyph_height = 128; // 128 pixels is a common height for glyphs
-
-    const scale_with_padding = stb.TrueType.ScaleForPixelHeight(&font_info, glyph_height - padding * 2);
-    const scale = stb.TrueType.ScaleForPixelHeight(&font_info, glyph_height);
-
-    var num_rects_using: u32 = 0;
-    // get all the rects for the ASCII range
-    {
-        for (0..num_codepoints) |i| {
-            const codepoint: u21 = @intCast(ascii_first + i);
-            const glyph = stb.TrueType.FindGlyphIndex(&font_info, @intCast(codepoint));
-
-            var advance: c_int = undefined;
-            var lsb: c_int = undefined;
-            stb.TrueType.GetGlyphHMetrics(
-                &font_info,
-                glyph,
-                &advance,
-                &lsb,
-            );
-            const rect_pointer: *stb.Rectpack.rect = &rects[i];
-            const packedchar_pointer: *stb.TrueType.packedchar = &char_info[i];
-            packedchar_pointer.xadvance = @as(f32, @floatFromInt(advance)) * scale;
-            rect_pointer.* = .{};
-            if (glyph == 0) {
-                rect_pointer.w = 0;
-                rect_pointer.h = 0;
-                continue;
-            }
-            var x0: c_int = undefined;
-            var y0: c_int = undefined;
-            var x1: c_int = undefined;
-            var y1: c_int = undefined;
-            stb.TrueType.GetGlyphBitmapBoxSubpixel(
-                &font_info,
-                glyph,
-                scale,
-                scale,
-                0, // shift_x
-                0, // shift_y
-                &x0,
-                &y0,
-                &x1,
-                &y1,
-            );
-            rect_pointer.w = @intCast(x1 - x0);
-            rect_pointer.h = @intCast(y1 - y0);
-
-            packedchar_pointer.xoff = @floatFromInt(x0);
-            packedchar_pointer.yoff = @floatFromInt(-y0 - (y1 - y0));
-            packedchar_pointer.xoff2 = @floatFromInt(x0 + (x1 - x0));
-            packedchar_pointer.yoff2 = @floatFromInt(-y0);
-
-            num_rects_using += 1;
+    for (&codepoint_ranges.default) |range| {
+        if (range[0] == 0 and range[1] == 0) break;
+        for (range[0]..range[1]) |codepoint| {
+            const cp: u21 = @intCast(codepoint);
+            charset.add(cp);
         }
     }
-    const pack_rect_result = stb.Rectpack.pack_rects(&pack_context, rects.ptr, @intCast(num_codepoints));
-    if (pack_rect_result == 0) {
-        return error.PackFontRangeFailed;
+
+    const glyph_quads = try allocator.alloc(
+        GlyphQuad,
+        charset.size(),
+    );
+    errdefer allocator.free(glyph_quads);
+
+    const font_geometry = msdfatlasgen.FontGeometry.init() orelse {
+        std.log.err("Failed to create font geometry", .{});
+        return error.InitFontGeometryFailed;
+    };
+    defer font_geometry.deinit();
+
+    const char_scale = 1.0;
+    const load_charset_res = font_geometry.loadCharset(ft_font, char_scale, charset);
+    _ = load_charset_res;
+    const glyphs = font_geometry.getGlyphs();
+    for (0..glyphs.count) |i| {
+        glyphs.setEdgeColoring(i, .by_distance, 3.0, 0);
     }
-    var num_non_packed: u32 = 0;
-    for (rects) |rect| {
-        if (rect.was_packed == 0) {
-            num_non_packed += 1;
-        }
-    }
-    if (num_non_packed > 0) {
-        std.log.err("Some rects were not packed, this may cause issues with rendering", .{});
+
+    const packer = msdfatlasgen.Packer.init() orelse {
+        std.log.err("Failed to create packer", .{});
+        return error.InitPackerFailed;
+    };
+    defer packer.deinit();
+
+    packer.setDimensionsConstraint(.square);
+    packer.setMinimumScale(24.0);
+    packer.setPixelRange(-1.0, 1.0);
+    packer.setMiterLimit(1.0);
+    packer.setDimensions(@intCast(width), @intCast(height));
+    packer.setOuterPixelPadding(padding, padding, padding, padding);
+    const pack_res = packer.pack(glyphs);
+    if (pack_res != 0) {
+        std.log.err("Failed to pack glyphs {}", .{pack_res});
         return error.PackFontRangeFailed;
     }
 
-    {
-        for (ascii_first..ascii_last + 1, rects, 0..) |codepoint, rect, i| {
-            const packedchar_ptr: *stb.TrueType.packedchar = &char_info[i];
-            packedchar_ptr.x0 = @intCast(rect.x);
-            packedchar_ptr.y0 = @intCast(rect.y + rect.h);
-            packedchar_ptr.x1 = @intCast(rect.x + rect.w);
-            packedchar_ptr.y1 = @intCast(rect.y);
+    const generator = msdfatlasgen.ImmediateAtlasGenerator.init(width, height) orelse {
+        std.log.err("Failed to create atlas generator", .{});
+        return error.InitAtlasGeneratorFailed;
+    };
+    defer generator.deinit();
 
-            const glyph_index = stb.TrueType.FindGlyphIndex(&font_info, @intCast(codepoint));
+    generator.setThreadCount(4);
+    generator.generate(glyphs);
+    const scale = packer.getScale();
 
-            // msdf glyph
-            if (true) {
-                var metrics: msdfc.Metrics = undefined;
-                const opt_msdf = msdfc.ex_msdf_glyph(
-                    &font_info,
-                    @intCast(codepoint),
-                    @intCast(rect.w),
-                    @intCast(rect.h),
-                    &metrics,
-                    1, // autofit
-                );
-                const msdf = opt_msdf orelse {
-                    std.log.err("Failed to generate glyph for codepoint {d}", .{codepoint});
-                    continue;
-                };
-                defer msdfc.free_msdf_glyph(msdf);
+    const bitmap = generator.getBitmap();
+    const bitmap_slice = bitmap.slice();
 
-                std.debug.print("Packed char {d}: x0: {d}, y0: {d}, x1: {d}, y1: {d}\n", .{
-                    codepoint, packedchar_ptr.x0, packedchar_ptr.y0, packedchar_ptr.x1, packedchar_ptr.y1,
-                });
+    // write the image first
+    for (0..height) |inv_h| {
+        for (0..width) |w| {
+            const h = height - 1 - inv_h; // flip y axis
+            const idx: usize = (w + inv_h * width) * 3;
+            const idx_4_channel: usize = (w + h * width) * 4;
 
-                //                   chardata[i].x0 = (stbtt_int16) x;
-                //   chardata[i].y0 = (stbtt_int16) y;
-                //   chardata[i].x1 = (stbtt_int16) (x + gw);
-                //   chardata[i].y1 = (stbtt_int16) (y + gh);
-                //   chardata[i].xadvance = scale * advance;
-                //   chardata[i].xoff     = (float) x0;
-                //   chardata[i].yoff     = (float) y0;
+            const red_float: f32 = bitmap_slice[idx];
+            const green_float: f32 = bitmap_slice[idx + 1];
+            const blue_float: f32 = bitmap_slice[idx + 2];
 
-                // packedchar_ptr.xoff = @floatFromInt(metrics.ix0);
-                // packedchar_ptr.yoff = @floatFromInt(-metrics.iy1 - rect.h);
-                // packedchar_ptr.xoff2 = @floatFromInt(metrics.ix1 + rect.w);
-                // packedchar_ptr.yoff2 = @floatFromInt(-metrics.iy0);
-                // packedchar_ptr.x0 = @intCast(rect.x);
-                // packedchar_ptr.y0 = @intCast(rect.y + rect.h);
-                // packedchar_ptr.x1 = @intCast(rect.x + rect.w);
-                // packedchar_ptr.y1 = @intCast(rect.y);
-                // packedchar_ptr.xadvance = @floatFromInt(metrics.advance);
-
-                const rx: usize = @intCast(rect.x);
-                const ry: usize = @intCast(rect.y);
-                const msdf_w: usize = @intCast(rect.w);
-                const msdf_h: usize = @intCast(rect.h);
-                for (0..msdf_h) |y| {
-                    for (0..msdf_w) |x| {
-                        const idx: usize = (x + y * msdf_w) * 3;
-                        const idx_4_channel: usize = ((x + rx) + (y + ry) * width) * 4;
-
-                        const red_float: f32 = msdf[idx];
-                        const green_float: f32 = msdf[idx + 1];
-                        const blue_float: f32 = msdf[idx + 2];
-
-                        slice_floats[idx_4_channel] = red_float; // R
-                        slice_floats[idx_4_channel + 1] = green_float; // G
-                        slice_floats[idx_4_channel + 2] = blue_float; // B
-                        slice_floats[idx_4_channel + 3] = 0xFF;
-                    }
-                }
-            }
-
-            // stb glyph sdfs
-            if (false) {
-
-                // alternative, render the shape to an sdf with stbtt
-                var sdf_width: c_int = 0;
-                var sdf_height: c_int = 0;
-                var sdf_xoff: c_int = 0;
-                var sdf_yoff: c_int = 0;
-                const stb_sdf = stb.TrueType.GetGlyphSDF(
-                    &font_info,
-                    scale_with_padding,
-                    glyph_index,
-                    padding,
-                    255,
-                    127.5,
-                    &sdf_width,
-                    &sdf_height,
-                    &sdf_xoff,
-                    &sdf_yoff,
-                );
-                defer stb.TrueType.FreeSDF(stb_sdf, null);
-
-                const rx: usize = @intCast(rect.x);
-                const ry: usize = @intCast(rect.y);
-                const sdf_w: usize = @intCast(sdf_width);
-                const sdf_h: usize = @intCast(sdf_height);
-                for (0..sdf_h) |y| {
-                    for (0..sdf_w) |x| {
-                        const idx: usize = (x + y * sdf_w);
-                        const idx_4_channel: usize = ((x + rx) + (y + ry) * width) * 4;
-
-                        const pixel_value: u8 = stb_sdf[idx];
-                        slice[idx_4_channel] = pixel_value; // R
-                        slice[idx_4_channel + 1] = pixel_value; // G
-                        slice[idx_4_channel + 2] = pixel_value; // B
-                        slice[idx_4_channel + 3] = 0xFF;
-                    }
-                }
-            }
+            slice_floats[idx_4_channel] = red_float; // R
+            slice_floats[idx_4_channel + 1] = green_float; // G
+            slice_floats[idx_4_channel + 2] = blue_float; // B
+            slice_floats[idx_4_channel + 3] = 1.0; // A
         }
     }
+
+    for (0..glyphs.count) |i| {
+        const advance = glyphs.getAdvance(i);
+        const box = glyphs.getBoxRect(i);
+        const bounds = glyphs.getQuadPlaneBounds(i);
+        const quad: *GlyphQuad = &glyph_quads[i];
+        quad.advance = advance;
+        quad.x_offset = .{ bounds.left, bounds.right };
+        quad.y_offset = .{ bounds.bottom, bounds.top };
+        if (box.w == 0 or box.h == 0) {
+            quad.top_left_texture = .{ 0, 0 };
+            quad.bottom_right_texture = .{ 0, 0 };
+            continue; // skip empty glyphs
+        }
+        quad.top_left_texture = .{ box.x + 1, box.y + 1 };
+        quad.bottom_right_texture = .{ box.x + box.w - 1, box.y + box.h - 1 };
+    }
+
+    var found_metrics = ft_font.getMetrics(.NONE) orelse {
+        std.log.err("Failed to get font metrics", .{});
+        return error.GetFontMetricsFailed;
+    };
+    const geometry_scale = char_scale / (if (found_metrics.em_size <= 0.0) 2048.0 else found_metrics.em_size);
+    found_metrics.em_size *= geometry_scale;
+    found_metrics.ascender_y *= geometry_scale;
+    found_metrics.descender_y *= geometry_scale;
+    found_metrics.line_height *= geometry_scale;
+    found_metrics.underline_y *= geometry_scale;
+    found_metrics.underline_thickness *= geometry_scale;
 
     return .{
         .allocator = allocator,
-        .char_info = char_info,
-        .text_size = @intCast(data.len),
-        .font_size = 1.0,
+        .glyph_quads = glyph_quads,
+        .font_size = @floatCast(found_metrics.ascender_y - found_metrics.descender_y),
         .image = out_image,
+        .max_padding = padding,
+        .max_padding_scaled = @floatCast(@as(f32, padding) / scale),
     };
 }
 
-// map a range min max to another min max number
-fn mapRange(
-    value: f32,
-    in_min: f32,
-    in_max: f32,
-    out_min: f32,
-    out_max: f32,
-) f32 {
-    return (value - in_min) / (in_max - in_min) * (out_max - out_min) + out_min;
+var ft_lib: ?*msdfgen.FreetypeHandle = null;
+fn getFreetypeLib() !*msdfgen.FreetypeHandle {
+    if (ft_lib) |lib| return lib;
+    const new_lib = msdfgen.FreetypeHandle.init() orelse {
+        std.log.err("Failed to initialize FreeType", .{});
+        return error.InitFreetypeFailed;
+    };
+    ft_lib = new_lib;
+    return new_lib;
 }
 
 pub fn loadTTFFromPath(allocator: std.mem.Allocator, path: []const u8, width: u32, height: u32) !FontAtlas {
@@ -276,9 +181,23 @@ pub fn loadTTFFromPath(allocator: std.mem.Allocator, path: []const u8, width: u3
 }
 
 pub fn deinit(self: FontAtlas) void {
-    self.allocator.free(self.char_info);
+    self.allocator.free(self.glyph_quads);
     self.image.deinit();
 }
+
+/// Represents a glyph quad in the font atlas.
+pub const GlyphQuad = struct {
+    /// the top left corner coordinate (in pixel space)
+    top_left_texture: [2]u32 = .{ 0, 0 },
+    /// the bottom right corner coordinate (in pixel space)
+    bottom_right_texture: [2]u32 = .{ 0, 0 },
+    /// the x offset of the glyph, for the left and right edges
+    x_offset: [2]f64 = .{ 0, 0 },
+    /// the y offset of the glyph, for the top and bottom edges
+    y_offset: [2]f64 = .{ 0, 0 },
+    /// how much to advance the cursor after rendering this glyph
+    advance: f32 = 0,
+};
 
 pub const CharQuad = struct {
     uv_top_left: [2]f32,
@@ -310,37 +229,67 @@ pub const CharQuad = struct {
     }
 };
 
-pub fn getCharQuad(self: *const FontAtlas, codepoint: u21) CharQuad {
+/// size in pixels
+pub fn getCharQuad(self: *const FontAtlas, codepoint: u21, size: f32) CharQuad {
     var x_pos: f32 = 0;
     var y_pos: f32 = 0;
-    return self.getCharQuadMoving(codepoint, &x_pos, &y_pos);
+    return self.getCharQuadMoving(codepoint, size, &x_pos, &y_pos);
 }
 
-pub fn getCharQuadMoving(self: *const FontAtlas, codepoint: u21, x_pos: *f32, y_pos: *f32) CharQuad {
-    var aligned_quad: stb.TrueType.aligned_quad = undefined;
-    stb.TrueType.GetPackedQuad(
-        @ptrCast(self.char_info),
-        @intCast(self.image.width),
-        @intCast(self.image.height),
-        @intCast(codepoint - 32), // Adjust for ASCII offset
-        @ptrCast(x_pos),
-        @ptrCast(y_pos),
-        &aligned_quad,
-        1,
-    );
+/// size in pixels
+pub fn getCharQuadMoving(self: *const FontAtlas, codepoint: u21, size: f32, x_pos: *f32, y_pos: *f32) CharQuad {
+    const scale = size / self.font_size;
+    const max_padding: f32 = self.max_padding_scaled * scale;
+    const char_index: usize = @intCast(codepoint - 32); // Adjust for ASCII offset
+    const glyph = self.glyph_quads[char_index];
+
+    const x0 = x_pos.* + (glyph.x_offset[0]) * scale - max_padding;
+    const y0 = y_pos.* + (glyph.y_offset[0]) * scale - max_padding;
+    const x1 = x_pos.* + (glyph.x_offset[1]) * scale + max_padding;
+    const y1 = y_pos.* + (glyph.y_offset[1]) * scale + max_padding;
+
+    const s0 = @as(f32, @floatFromInt(glyph.top_left_texture[0] - 0)) / @as(f32, @floatFromInt(self.image.width));
+    const s1 = @as(f32, @floatFromInt(glyph.bottom_right_texture[0] + 0)) / @as(f32, @floatFromInt(self.image.width));
+
+    const t0 = @as(f32, @floatFromInt(glyph.top_left_texture[1] - 0)) / @as(f32, @floatFromInt(self.image.height));
+    const t1 = @as(f32, @floatFromInt(glyph.bottom_right_texture[1] + 0)) / @as(f32, @floatFromInt(self.image.height));
+
+    x_pos.* += glyph.advance * scale;
 
     const quad: CharQuad = .{
-        .uv_top_left = .{ aligned_quad.s0, aligned_quad.t1 },
-        .uv_bottom_right = .{ aligned_quad.s1, aligned_quad.t0 },
+        .uv_top_left = .{ s0, 1 - t1 },
+        .uv_bottom_right = .{ s1, 1 - t0 },
         // .uv_offset = .{ 0, 0.5 },
         // .uv_scale = .{ 0.5, 0.5 },
-        .position_top_left = .{ aligned_quad.x0, aligned_quad.y0 },
-        .position_bottom_right = .{ aligned_quad.x1, aligned_quad.y1 },
+        .position_top_left = .{ @floatCast(x0), @floatCast(y0) },
+        .position_bottom_right = .{ @floatCast(x1), @floatCast(y1) },
     };
 
     return quad;
 }
 
+// codepoint ranges from https://github.com/Jack-Ji/jok/tree/main/src
+// MIT License
+
+// Copyright (c) 2022 jack
+
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
 const codepoint_ranges = struct {
     /// Useful codepoint ranges
     pub const default = [_][2]u32{
