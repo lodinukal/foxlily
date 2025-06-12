@@ -3168,7 +3168,6 @@ const gpu = @import("../gpu.zig");
 const std = @import("std");
 
 const sdl = @import("../sdl.zig");
-const foxlily = @import("../root.zig");
 
 const OffsetAllocator = @import("OffsetAllocator.zig");
 const Allocation = OffsetAllocator.Allocation;
