@@ -7,6 +7,20 @@ pub const min_upload_page_size = 64 * 1024 * 1024; // 64 MiB
 /// how many bytes worth of upload buffers to retain in the transfer queue, so that they can be reused
 pub const upload_buffer_retain_size = 256 * 1024 * 1024; // 256 MiB
 
+pub const Multisample = enum {
+    none,
+    x4,
+    x8,
+
+    pub fn toNum(self: Multisample) u32 {
+        return switch (self) {
+            .none => 1,
+            .x4 => 4,
+            .x8 => 8,
+        };
+    }
+};
+
 pub const Config = struct {
     texture_num: u32 = 2,
     immediate: bool = true,
@@ -15,6 +29,7 @@ pub const Config = struct {
     /// texture2d
     max_quads_per_flush: u32 = 1024, // 1024 quads per flush
     clear_color: ila.gpu.Color = .{ 0.0, 0.0, 0.0, 1.0 }, // white
+    multisample: Multisample = .x8,
 };
 
 allocator: std.mem.Allocator,
@@ -38,7 +53,9 @@ backbuffer_index: usize = 0,
 cmd_bufs: [ila.gpu.MAX_SWAPCHAIN_IMAGES]*ila.gpu.CommandBuffer = @splat(undefined),
 
 frame_textures: [ila.gpu.MAX_SWAPCHAIN_IMAGES]?*ila.gpu.Texture = @splat(null),
-frame_srvs: [ila.gpu.MAX_SWAPCHAIN_IMAGES]?*ila.gpu.Resource = @splat(null),
+frame_rtvs: [ila.gpu.MAX_SWAPCHAIN_IMAGES]?*ila.gpu.Resource = @splat(null),
+
+multisample_textures: [ila.gpu.MAX_SWAPCHAIN_IMAGES]?ila.render.Texture = @splat(null),
 
 frame_depth_texture: ?ila.render.Texture = null,
 
@@ -141,16 +158,26 @@ pub fn deinit(self: *Context) void {
 
     self.frame_arena.deinit();
 
-    self.resources.deinit();
+    // self.resources.deinit();
 
     // deinit transfer resources
     self.transfer.deinit(self.allocator);
 }
 
 fn cleanupSwapchainResources(self: *Context) void {
-    for (self.frame_srvs[0..self.swapchain_desc.texture_num]) |*srv| {
+    for (self.frame_rtvs[0..self.swapchain_desc.texture_num]) |*srv| {
         if (srv.*) |got_srv| got_srv.deinit();
         srv.* = null;
+    }
+
+    for (self.frame_textures[0..self.swapchain_desc.texture_num]) |*tex| {
+        if (tex.*) |got_tex| got_tex.deinit();
+        tex.* = null;
+    }
+
+    for (self.multisample_textures[0..self.swapchain_desc.texture_num]) |*tex| {
+        if (tex.*) |*got_tex| got_tex.deinit();
+        tex.* = null;
     }
 
     if (self.frame_depth_texture) |*tex| {
@@ -163,7 +190,7 @@ fn cleanupSwapchainResources(self: *Context) void {
 fn acquireSwapchainResources(self: *Context) !void {
     self.cleanupSwapchainResources();
 
-    for (self.frame_srvs[0..self.swapchain_desc.texture_num], 0..) |*srv, i| {
+    for (self.frame_rtvs[0..self.swapchain_desc.texture_num], 0..) |*srv, i| {
         self.frame_textures[i] = (try self.swapchain.getTexture(i)) orelse {
             std.debug.panic("Failed to get swapchain texture", .{});
         };
@@ -177,6 +204,32 @@ fn acquireSwapchainResources(self: *Context) !void {
             .layer_num = 1,
         });
     }
+    for (self.multisample_textures[0..self.swapchain_desc.texture_num], 0..) |*tex, i| {
+        if (self.config.multisample == .none) {
+            tex.* = null;
+            self.multisample_textures[i] = null;
+            continue;
+        }
+
+        const sample_num = self.config.multisample.toNum();
+        tex.* = try ila.render.Texture.init(self.frame_arena.allocator(), .{
+            .name = "multisample texture",
+            .kind = .d2,
+            .usage = .{
+                .rtv = true,
+            },
+            .location = .device,
+            .format = self.swapchain_desc.format,
+            .clear_value = .color(self.config.clear_color),
+            .width = self.swapchain_desc.size.x,
+            .height = self.swapchain_desc.size.y,
+            .depth = 1,
+            .mip_num = 1,
+            .layer_num = 1,
+            .sample_num = sample_num,
+        });
+    }
+
     self.frame_depth_texture = try ila.render.Texture.init(self.frame_arena.allocator(), .{
         .name = "depth texture",
         .kind = .d2,
@@ -192,7 +245,7 @@ fn acquireSwapchainResources(self: *Context) !void {
         .depth = 1,
         .mip_num = 1,
         .layer_num = 1,
-        .sample_num = 1,
+        .sample_num = self.config.multisample.toNum(),
     });
 
     const cmd = try self.transferCommandBuffer();
@@ -205,9 +258,21 @@ pub inline fn resize(self: *Context, size: ila.gpu.Vec2u) void {
     self.queue_resize = size;
 }
 
+pub inline fn backbuffer(self: *Context) *ila.gpu.Texture {
+    return self.frame_textures[self.backbuffer_index].?;
+}
+
 /// gets the current backbuffer rtv
-pub inline fn backbuffer(self: *Context) *ila.gpu.Resource {
-    return self.frame_srvs[self.backbuffer_index].?;
+pub inline fn backbufferRTV(self: *Context) *ila.gpu.Resource {
+    return self.frame_rtvs[self.backbuffer_index].?;
+}
+
+pub inline fn backbufferMSAA(self: *Context) *ila.render.Texture {
+    return &self.multisample_textures[self.backbuffer_index].?;
+}
+
+pub inline fn backbufferMSAARTV(self: *Context) *ila.gpu.Resource {
+    return self.backbufferMSAA().rtv.?;
 }
 
 /// gets the depth texture
@@ -236,6 +301,10 @@ pub inline fn viewport(self: *Context) ila.gpu.Viewport {
         .max_depth = 1.0,
         .origin_bottom_left = true,
     };
+}
+
+pub inline fn currentCmd(self: *Context) *ila.gpu.CommandBuffer {
+    return self.cmd_bufs[self.frame_index % self.swapchain_desc.texture_num];
 }
 
 /// processes any frame operations that need to be done before rendering
@@ -294,17 +363,16 @@ pub fn beginFrame(self: *Context) !*ila.gpu.CommandBuffer {
 
     try self.processOperations();
 
-    const cmd = self.cmd_bufs[self.frame_index % self.swapchain_desc.texture_num];
+    const cmd = self.currentCmd();
     try cmd.begin();
     self.previous_frame_time = if (self.frame_start_time != 0) (std.time.nanoTimestamp() - self.frame_start_time) else 0;
     self.frame_start_time = std.time.nanoTimestamp();
     self.backbuffer_index = try self.swapchain.acquireNextTexture();
-    cmd.ensureTextureState(self.frame_textures[self.backbuffer_index].?, .render_target);
     return cmd;
 }
 
 pub fn endFrame(self: *Context) !void {
-    const cmd = self.cmd_bufs[self.frame_index % self.swapchain_desc.texture_num];
+    const cmd = self.currentCmd();
     cmd.ensureTextureState(self.frame_textures[self.backbuffer_index].?, .present);
     try cmd.end();
     try self.swapchain_desc.queue.submit(cmd);
@@ -314,13 +382,31 @@ pub fn endFrame(self: *Context) !void {
     try self.swapchain_desc.queue.signalFence(self.frame_fence, self.frame_index);
 }
 
-pub fn beginRendering(self: *Context) void {
-    const b = self.backbuffer();
+pub const RenderOption = enum {
+    msaa,
+    no_msaa,
+};
+
+pub fn beginRendering(self: *Context, option: RenderOption) void {
+    const msaa_texture = self.backbufferMSAA();
+    const back = self.backbuffer();
+    const cmd = self.currentCmd();
+    const b = switch (option) {
+        .msaa => blk: {
+            cmd.ensureTextureState(msaa_texture.texture, .render_target);
+            cmd.ensureTextureState(back, .resolve_dest);
+            break :blk msaa_texture.rtv.?;
+        },
+        .no_msaa => blk: {
+            cmd.ensureTextureState(back, .render_target);
+            break :blk self.backbufferRTV();
+        },
+    };
     self.beginRenderingToAttachments(&.{b});
 }
 
 pub fn beginRenderingToAttachments(self: *Context, attachments: []const *ila.gpu.Resource) void {
-    const cmd = self.cmd_bufs[self.frame_index % self.swapchain_desc.texture_num];
+    const cmd = self.currentCmd();
 
     const window_vp = self.viewport();
     const window_rect = self.rect();
@@ -346,9 +432,19 @@ pub fn beginRenderingToAttachments(self: *Context, attachments: []const *ila.gpu
     };
 }
 
-pub fn endRendering(self: *Context) void {
-    const cmd = self.cmd_bufs[self.frame_index % self.swapchain_desc.texture_num];
+pub fn endRendering(self: *Context, option: RenderOption) void {
+    const cmd = self.currentCmd();
     cmd.endRendering();
+
+    const msaa_texture = self.backbufferMSAA();
+    const back = self.backbuffer();
+    switch (option) {
+        .msaa => {
+            cmd.ensureTextureState(msaa_texture.texture, .resolve_source);
+            cmd.resolveTexture(back, null, msaa_texture.texture, null);
+        },
+        else => {},
+    }
 }
 
 // transfer ops

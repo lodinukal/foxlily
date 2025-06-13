@@ -22,6 +22,11 @@ const App = struct {
     roboto_font_atlas: ila.Resource.FontAtlas = undefined,
     roboto_font_atlas_texture: ila.render.Texture = undefined,
     roboto_font_atlas_id: u32 = undefined,
+
+    notosans_font_atlas: ila.Resource.FontAtlas = undefined,
+    notosans_font_atlas_texture: ila.render.Texture = undefined,
+    notosans_font_atlas_id: u32 = undefined,
+
     pukeko_image: ila.Resource.Image = undefined,
     pukeko_texture: ila.render.Texture = undefined,
     accumulated_time: i128 = 0,
@@ -57,7 +62,7 @@ pub fn init(app_state: **App, args: []const [*:0]const u8) AppError!void {
             .resizable = true,
         }),
         .context = try .fromWindow(app.allocator, app.window, .{
-            .immediate = true,
+            .immediate = false,
             .clear_color = .{ 0.91, 0.74, 0.52, 1.0 },
         }),
         .batch2d = .{
@@ -95,6 +100,27 @@ pub fn init(app_state: **App, args: []const [*:0]const u8) AppError!void {
         return err;
     };
 
+    app.notosans_font_atlas = ila.Resource.FontAtlas.loadTTFFromPath(
+        app.allocator,
+        "assets/fonts/NotoSansJP-Regular.ttf",
+        1024,
+        1024,
+    ) catch |err| {
+        std.log.info("could not load notosans font atlas: {}", .{err});
+        return error.Unknown;
+    };
+    app.notosans_font_atlas.image.writeToFile("notosans_font_atlas.hdr", .hdr) catch |err| {
+        std.log.info("could not write notosans font atlas to file: {}", .{err});
+        return error.Unknown;
+    };
+    app.notosans_font_atlas_texture = ila.render.Texture.fromImage(app.allocator, .{
+        .context = &app.context,
+        .image = &app.notosans_font_atlas.image,
+    }) catch |err| {
+        std.log.info("could not create notosans font atlas texture: {}", .{err});
+        return err;
+    };
+
     // Load an image asset
     app.pukeko_image = ila.Resource.Image.loadFromPath(app.allocator, "assets/images/pukeko.jpg") catch |err| {
         std.log.info("could not load pukeko image: {}", .{err});
@@ -118,6 +144,10 @@ pub fn init(app_state: **App, args: []const [*:0]const u8) AppError!void {
         std.log.info("could not add roboto font atlas in main set: {}", .{err});
         return err;
     };
+    app.notosans_font_atlas_id = app.context.resources.addTexture(app.notosans_font_atlas_texture.srv.?) catch |err| {
+        std.log.info("could not add notosans font atlas in main set: {}", .{err});
+        return err;
+    };
 
     for (args) |arg| {
         std.log.info("arg: {s}", .{arg});
@@ -129,6 +159,10 @@ pub fn deinit(app: *App, _: sdl.c.SDL_AppResult) void {
     app.pukeko_texture.deinit();
     app.roboto_font_atlas.deinit();
     app.roboto_font_atlas_texture.deinit();
+
+    app.notosans_font_atlas.deinit();
+    app.notosans_font_atlas_texture.deinit();
+    app.context.resources.deinit();
 
     app.batch2d.deinit();
     app.context.deinit();
@@ -143,6 +177,14 @@ pub fn deinit(app: *App, _: sdl.c.SDL_AppResult) void {
 pub fn tick(app: *App) AppError!void {
     // const window_vp = app.context.viewport();
     // const window_rect = app.context.rect();
+
+    var timer = std.time.Timer.start() catch unreachable;
+    defer {
+        const elapsed_ns = timer.read();
+        const elapsed_ns_f64: f64 = @floatFromInt(elapsed_ns);
+        const elapsed_us: f64 = elapsed_ns_f64 / std.time.ns_per_us;
+        std.debug.print("tick took {d} us\n", .{(elapsed_us)});
+    }
 
     const this_delta = if (app.context.previous_frame_time < std.time.ns_per_s / 2)
         @as(f64, @floatFromInt(app.context.previous_frame_time)) / (std.time.ns_per_s * 1.0)
@@ -162,12 +204,13 @@ pub fn tick(app: *App) AppError!void {
 
         // const b = app.context.backbuffer();
 
-        app.context.beginRendering();
-        defer app.context.endRendering();
+        app.context.beginRendering(.msaa);
+        defer app.context.endRendering(.msaa);
 
         defer app.batch2d.flush(cmd, .ui);
 
         const swaying_x = std.math.sin(app.running_time);
+        const swaying_x2 = std.math.sin(app.running_time * 2);
 
         // const hsl color calculation
         // try app.batch2d.newDraw(.ui);
@@ -216,15 +259,26 @@ pub fn tick(app: *App) AppError!void {
 
         // ui
 
+        // app.batch2d.drawText(.{
+        //     .font_atlas = &app.roboto_font_atlas,
+        //     .font_image_index = app.roboto_font_atlas_id,
+        //     .string = "the quick brown fox\njumps over the lazy dog",
+        //     .position = .{ 50, 400, 1 }, // center of the screen
+        //     .color = .{ 1.0, 1.0, 1, 1 }, // white color
+        //     .stroke_width = ((swaying_x2 + 1) / 2) * 10,
+        //     .stroke_color = .{ 0.2, 0.2, 0.6, 1 }, // red stroke
+        //     .size = 200,
+        // });
+
         app.batch2d.drawText(.{
-            .font_atlas = &app.roboto_font_atlas,
-            .font_image_index = app.roboto_font_atlas_id,
-            .string = "the quick brown fox\njumps over the lazy dog",
-            .position = .{ 50, 120, 1 }, // center of the screen
+            .font_atlas = &app.notosans_font_atlas,
+            .font_image_index = app.notosans_font_atlas_id,
+            .string = "つけものすき",
+            .position = .{ 50, 400, 1 }, // center of the screen
             .color = .{ 1.0, 1.0, 1, 1 }, // white color
-            .stroke_width = (swaying_x) * 10,
+            .stroke_width = ((swaying_x2 + 1) / 2) * 10,
             .stroke_color = .{ 0.2, 0.2, 0.6, 1 }, // red stroke
-            .size = 90,
+            .size = 200,
         });
     }
 }

@@ -11,7 +11,7 @@ struct vertex_info
     uint flags : TEXCOORD8;                         // Flags for additional information, e.g., whether to discard the pixel
 };
 
-static const uint VERTEX_FLAG_TEXTURE_TEXT = 0x1; // Flag to indicate that the vertex uses SDF texture sampling
+static const uint VERTEX_FLAG_TEXTURE_MSDF = 0x1; // Flag to indicate that the vertex uses SDF texture sampling
 
 struct vertex_to_pixel
 {
@@ -99,63 +99,67 @@ fragment_out fragment(in vertex_to_pixel IN)
 
     float softness = 0.01f;
     float4 texture_pixel = textures[NonUniformResourceIndex(IN.texture_index)].Sample(linear_sampler, float2(IN.real_texcoord.x, IN.real_texcoord.y));
-    const bool is_text = (IN.flags & VERTEX_FLAG_TEXTURE_TEXT) != 0; // Check if the vertex uses SDF texture sampling
-    if (is_text)
+    const bool is_msdf = (IN.flags & VERTEX_FLAG_TEXTURE_MSDF) != 0; // Check if the vertex uses SDF texture sampling
+
+    float x = 0.0;
+    float edges[4] = { 0.0, 0.0, 0.0, 0.0 };
+    float edge_feather = 0.01f; // Feathering for the edges
+
+    const float border_width = max(IN.border_width, 0.0); // Ensure border width is non-negative
+    float4 color = IN.color;
+    float4 border_color = border_width == 0.0 ? IN.color : IN.border_color;
+
+    if (is_msdf)
     {
         float sdf_distance_outside = 0.5 - median(texture_pixel.r, texture_pixel.g, texture_pixel.b); // Use average of RGB channels for SDF distance
-
         const float px_range = 2.0;
         float screen_px_range = 72 / 32 * px_range;
-
         float screen_pixel_dist = screen_px_range * (sdf_distance_outside);
 
-        float opacity = saturate(screen_pixel_dist + 0.5);
-        // OUT.color = float4((screen_pixel_dist.xxx + 16.0) / 32.0, opacity);
-        // return OUT; // Return early for SDF textures
+        // in pixels
+        edge_feather = 1.5;
 
-        const float epsilon = 1; // Small value to avoid division by zero
-        // if (IN.border_width + epsilon < pixel_dist)
-        //     discard;
-        if (IN.border_width + 0.5 <= screen_pixel_dist)
-        {
-            float4 falloff_color = IN.border_width == 0.0 ? IN.color : IN.border_color;
-            falloff_color.a = opacity;
-            OUT.color = falloff_color;
-            OUT.depth = 1;
-            return OUT; // Return early for SDF textures
-        }
-        float4 border_color = IN.border_width == 0.0 ? IN.color : IN.border_color;
-        bool in_border = 0.5 < screen_pixel_dist && screen_pixel_dist < (IN.border_width + 0.5);
-
-        OUT.color = in_border ? border_color : IN.color;
-        if (OUT.color.a <= 0.5f)
-        {
-            OUT.depth = 1;
-        }
-
-        return OUT; // Return early for SDF textures
+        edges[0] = 0.5;
+        x = screen_pixel_dist;
     }
     else
     {
-        // get the pixel size per texcoord
-        float2 size = float2(1.0, 1.0);
-        // assume square box for non-SDF textures
-        float2 center = IN.texcoord * 2.0 - 1.0; // Convert to range [-1, 1]
-        float sdf_distance_outside = sdRoundedBox(center, size, IN.corner_radius);
+        float sdf_distance_outside = sdRoundedBox(IN.texcoord * 2.0 - 1.0, float2(1.0, 1.0), IN.corner_radius);
 
-        if (sdf_distance_outside > 0.0f)
-        {
-            discard;
-        }
+        // Arbitrary idk
+        edge_feather = 0.01f;
+        color *= texture_pixel; // Use the texture color for the main color
 
-        if (sdf_distance_outside + IN.border_width > 0.0f)
-        {
-            float smooth_alpha = 1.0f - smoothstep(0.0f, softness * 2.0f, sdf_distance_outside);
-            OUT.color = IN.border_color * smooth_alpha; // Apply border color with alpha
-            return OUT;
-        }
-
-        OUT.color = texture_pixel * IN.color; // Use the texture color multiplied by vertex color
-        return OUT;
+        edges[0] = 0.0 - edge_feather - border_width;
+        x = sdf_distance_outside;
     }
+
+    edges[1] = edges[0] + edge_feather;
+    edges[2] = edges[1] + border_width;
+    edges[3] = edges[2] + edge_feather;
+
+    if (x < edges[0])
+    {
+        OUT.color = color;
+    }
+    else if (x < edges[1])
+    {
+        OUT.color = lerp(color, border_color, (x - edges[0]) / (edges[1] - edges[0]));
+    }
+    else if (x < edges[2])
+    {
+        OUT.color = border_color;
+    }
+    else if (x < edges[3])
+    {
+        float opacity = 1.0 - (x - edges[2]) / (edges[3] - edges[2]);
+        OUT.color = border_color;
+        OUT.color.a *= opacity; // Apply opacity to the color
+    }
+    else
+    {
+        discard;
+    }
+
+    return OUT;
 };

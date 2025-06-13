@@ -36,7 +36,7 @@ pipeline_layout: *ila.gpu.PipelineLayout = undefined,
 pipeline: *ila.gpu.Pipeline = undefined,
 
 pub const VertexFlags = packed struct(u32) {
-    is_sdf: bool = false, // if true, the texture is an SDF texture (dont use the square texture)
+    is_msdf: bool = false, // if true, the texture is an SDF texture (dont use the square texture)
     _: u31 = 0, // padding to 32 bits
 };
 
@@ -103,7 +103,7 @@ pub fn init(self: *Batch, max_quads_per_flush: u32) !void {
     });
     graphics_pipeline_desc.depthAttachment(.{
         .write = true,
-        .compare_op = .less,
+        .compare_op = .less_equal,
     });
     graphics_pipeline_desc.depthClamp(true);
     graphics_pipeline_desc.depthStencilFormat(.D32);
@@ -113,6 +113,7 @@ pub fn init(self: *Batch, max_quads_per_flush: u32) !void {
     graphics_pipeline_desc.addShader(batch_shaders.fragment_spirv);
     graphics_pipeline_desc.addShader(batch_shaders.vertex_metal);
     graphics_pipeline_desc.addShader(batch_shaders.fragment_metal);
+    graphics_pipeline_desc.multiSampleNum(self.context.config.multisample.toNum());
     self.pipeline = try .initGraphics(self.allocator, graphics_pipeline_desc);
     errdefer self.pipeline.deinit();
 }
@@ -162,8 +163,8 @@ pub fn draw(self: *Batch, cmd: *ila.gpu.CommandBuffer, layer: Layer) void {
             frame_constants.projection = ila.math.orthographicOffCenterLh(
                 0,
                 frame_constants.frame_size[0],
-                frame_constants.frame_size[1],
                 0,
+                frame_constants.frame_size[1],
                 0.0,
                 10000,
             );
@@ -231,7 +232,7 @@ pub fn drawText(self: *Batch, desc: UITextDesc) void {
     while (iter.nextCodepoint()) |char| {
         if (char == '\n') {
             x.* = origin_x; // reset x to origin on newline
-            y.* -= (desc.size / desc.font_atlas.font_size) * desc.line_height_modifier; // move y down by scale
+            y.* += (desc.size / desc.font_atlas.font_size) * desc.line_height_modifier; // move y down by scale
             continue;
         }
 
@@ -248,7 +249,7 @@ pub fn drawText(self: *Batch, desc: UITextDesc) void {
             .rotation = 0.0,
             .size = .{ quad.width(), quad.height() }, // use the quad size
             .color = desc.color,
-            .flags = .{ .is_sdf = true }, // use SDF texture
+            .flags = .{ .is_msdf = true }, // use SDF texture
             .texture_index = desc.font_image_index, // use the font atlas texture
             .uv_top_left = quad.uv_top_left,
             .uv_bottom_right = quad.uv_bottom_right,
@@ -289,25 +290,25 @@ pub fn drawQuad(
     // add 6 vertices for a quad
     const math = ila.math;
 
-    const top_left_not_rotated: math.Vec = .{
+    const bottom_left_not_rotated: math.Vec = .{
         -desc.size[0] * desc.anchor[0],
         desc.size[1] * desc.anchor[1],
         0.0,
         0.0,
     };
-    const top_right_not_rotated: math.Vec = .{
+    const bottom_right_not_rotated: math.Vec = .{
         desc.size[0] * (1 - desc.anchor[0]),
         desc.size[1] * desc.anchor[1],
         0.0,
         0.0,
     };
-    const bottom_left_not_rotated: math.Vec = .{
+    const top_left_not_rotated: math.Vec = .{
         -desc.size[0] * desc.anchor[0],
         -desc.size[1] * (1 - desc.anchor[1]),
         0.0,
         0.0,
     };
-    const bottom_right_not_rotated: math.Vec = .{
+    const top_right_not_rotated: math.Vec = .{
         desc.size[0] * (1 - desc.anchor[0]),
         -desc.size[1] * (1 - desc.anchor[1]),
         0.0,

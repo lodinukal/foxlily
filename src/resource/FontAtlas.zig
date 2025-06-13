@@ -9,6 +9,7 @@ const msdfatlasgen = @import("msdfatlasgen");
 
 allocator: std.mem.Allocator,
 glyph_quads: []GlyphQuad = &.{},
+codepoint_to_quad: std.AutoArrayHashMapUnmanaged(u21, usize) = .empty,
 font_size: f32 = 0,
 image: ila.Resource.Image = .{},
 max_padding: u32 = 0,
@@ -37,13 +38,17 @@ pub fn loadFromData(allocator: std.mem.Allocator, data: []const u8, width: u32, 
     };
     defer charset.deinit();
 
-    for (&codepoint_ranges.default) |range| {
+    var codepoint_to_quad: std.AutoArrayHashMapUnmanaged(u21, usize) = .empty;
+    errdefer codepoint_to_quad.deinit(allocator);
+
+    for (&codepoint_ranges.lod_japanese) |range| {
         if (range[0] == 0 and range[1] == 0) break;
         for (range[0]..range[1]) |codepoint| {
             const cp: u21 = @intCast(codepoint);
             charset.add(cp);
         }
     }
+    try codepoint_to_quad.ensureTotalCapacity(allocator, charset.size());
 
     const glyph_quads = try allocator.alloc(
         GlyphQuad,
@@ -89,7 +94,7 @@ pub fn loadFromData(allocator: std.mem.Allocator, data: []const u8, width: u32, 
     };
     defer generator.deinit();
 
-    generator.setThreadCount(4);
+    generator.setThreadCount(16);
     generator.generate(glyphs);
     const scale = packer.getScale();
 
@@ -121,7 +126,7 @@ pub fn loadFromData(allocator: std.mem.Allocator, data: []const u8, width: u32, 
         const quad: *GlyphQuad = &glyph_quads[i];
         quad.advance = advance;
         quad.x_offset = .{ bounds.left, bounds.right };
-        quad.y_offset = .{ bounds.bottom, bounds.top };
+        quad.y_offset = .{ bounds.top, bounds.bottom };
         if (box.w == 0 or box.h == 0) {
             quad.top_left_texture = .{ 0, 0 };
             quad.bottom_right_texture = .{ 0, 0 };
@@ -129,6 +134,7 @@ pub fn loadFromData(allocator: std.mem.Allocator, data: []const u8, width: u32, 
         }
         quad.top_left_texture = .{ box.x + 1, box.y + 1 };
         quad.bottom_right_texture = .{ box.x + box.w - 1, box.y + box.h - 1 };
+        codepoint_to_quad.putAssumeCapacity(@intCast(glyphs.getCodepoint(i)), i);
     }
 
     var found_metrics = ft_font.getMetrics(.NONE) orelse {
@@ -150,6 +156,7 @@ pub fn loadFromData(allocator: std.mem.Allocator, data: []const u8, width: u32, 
         .image = out_image,
         .max_padding = padding,
         .max_padding_scaled = @floatCast(@as(f32, padding) / scale),
+        .codepoint_to_quad = codepoint_to_quad,
     };
 }
 
@@ -180,9 +187,10 @@ pub fn loadTTFFromPath(allocator: std.mem.Allocator, path: []const u8, width: u3
     );
 }
 
-pub fn deinit(self: FontAtlas) void {
+pub fn deinit(self: *FontAtlas) void {
     self.allocator.free(self.glyph_quads);
     self.image.deinit();
+    self.codepoint_to_quad.deinit(self.allocator);
 }
 
 /// Represents a glyph quad in the font atlas.
@@ -200,10 +208,10 @@ pub const GlyphQuad = struct {
 };
 
 pub const CharQuad = struct {
-    uv_top_left: [2]f32,
-    uv_bottom_right: [2]f32,
-    position_top_left: [2]f32,
-    position_bottom_right: [2]f32,
+    uv_top_left: [2]f32 = .{ 0, 0 },
+    uv_bottom_right: [2]f32 = .{ 0, 0 },
+    position_top_left: [2]f32 = .{ 0, 0 },
+    position_bottom_right: [2]f32 = .{ 0, 0 },
 
     pub fn width(self: CharQuad) f32 {
         return @abs(self.position_bottom_right[0] - self.position_top_left[0]);
@@ -240,13 +248,12 @@ pub fn getCharQuad(self: *const FontAtlas, codepoint: u21, size: f32) CharQuad {
 pub fn getCharQuadMoving(self: *const FontAtlas, codepoint: u21, size: f32, x_pos: *f32, y_pos: *f32) CharQuad {
     const scale = size / self.font_size;
     const max_padding: f32 = self.max_padding_scaled * scale;
-    const char_index: usize = @intCast(codepoint - 32); // Adjust for ASCII offset
-    const glyph = self.glyph_quads[char_index];
+    const glyph = self.glyph_quads[self.codepoint_to_quad.get(codepoint) orelse return .{}];
 
     const x0 = x_pos.* + (glyph.x_offset[0]) * scale - max_padding;
-    const y0 = y_pos.* + (glyph.y_offset[0]) * scale - max_padding;
+    const y0 = y_pos.* - (glyph.y_offset[0]) * scale - max_padding;
     const x1 = x_pos.* + (glyph.x_offset[1]) * scale + max_padding;
-    const y1 = y_pos.* + (glyph.y_offset[1]) * scale + max_padding;
+    const y1 = y_pos.* - (glyph.y_offset[1]) * scale + max_padding;
 
     const s0 = @as(f32, @floatFromInt(glyph.top_left_texture[0] - 0)) / @as(f32, @floatFromInt(self.image.width));
     const s1 = @as(f32, @floatFromInt(glyph.bottom_right_texture[0] + 0)) / @as(f32, @floatFromInt(self.image.width));
@@ -359,6 +366,17 @@ const codepoint_ranges = struct {
         },
     );
 
+    pub const lod_japanese = [_][2]u32{
+        .{ 0x0020, 0x00FF },
+        .{ 0x3041, 0x3096 }, // Hiragana
+        .{ 0x30A1, 0x30FF }, // Katakana
+        // .{ 0x3400, 0x4DB5 }, // CJK Unified Ideographs Extension A
+        // .{ 0x4E00, 0x9FCB }, // CJK Unified Ideographs
+        // .{ 0xF900, 0xFA6A }, // CJK Compatibility Ideographs
+        // .{ 0x3000, 0x303F }, // CJK Symbols and Punctuations
+        .{ 0, 0 },
+    };
+
     pub const japanese = genRanges(
         &[_][2]u32{
             .{ 0x0020, 0x00FF }, // Basic Latin + Latin Supplement
@@ -368,7 +386,7 @@ const codepoint_ranges = struct {
             .{ 0xFFFD, 0xFFFD }, // Invalid
         },
         0x4E00,
-        &[_]f32{
+        &[_]u32{
             0,  1,  2,  4,  1,   1,   1,  1,  2,  1,  3,  3,  2,  2,  1,  5,  3,  5,  7,  5,  6,  1,   2,  1,  7,  2,  6,   3,  1,  8,  1,  1,  4,  1,  1,  18, 2,  11, 2,  6,  2,  1,  2,  1,  5,     1,  2,  1,  3,   1,  2,  1,  2,  3,  3,  1,  1,  2,  3,  1,  1,  1,  12, 7,  9,  1,  4,  5,  1,
             1,  2,  1,  10, 1,   1,   9,  2,  2,  4,  5,  6,  9,  3,  1,  1,  1,  1,  9,  3,  18, 5,   2,  2,  2,  2,  1,   6,  3,  7,  1,  1,  1,  1,  2,  2,  4,  2,  1,  23, 2,  10, 4,  3,  5,     2,  4,  10, 2,   4,  13, 1,  6,  1,  9,  3,  1,  1,  6,  6,  7,  6,  3,  1,  2,  11, 3,  2,  2,
             3,  2,  15, 2,  2,   5,   4,  3,  6,  4,  1,  2,  5,  2,  12, 16, 6,  13, 9,  13, 2,  1,   1,  7,  16, 4,  7,   1,  19, 1,  5,  1,  2,  2,  7,  7,  8,  2,  6,  5,  4,  9,  18, 7,  4,     5,  9,  13, 11,  8,  15, 2,  1,  1,  1,  2,  1,  2,  2,  1,  2,  2,  8,  2,  9,  3,  3,  1,  1,
