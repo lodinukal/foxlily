@@ -273,12 +273,13 @@ pub fn tick(app: *App) AppError!void {
         app.batch2d.drawText(.{
             .font_atlas = &app.notosans_font_atlas,
             .font_image_index = app.notosans_font_atlas_id,
-            .string = "つけものすき",
+            .string = "I love pickles\nつけものすき",
             .position = .{ 50, 400, 1 }, // center of the screen
             .color = .{ 1.0, 1.0, 1, 1 }, // white color
-            .stroke_width = ((swaying_x2 + 1) / 2) * 10,
+            .stroke_width = ((swaying_x2 + 1) / 2) * 5,
             .stroke_color = .{ 0.2, 0.2, 0.6, 1 }, // red stroke
             .size = 200,
+            .line_height_modifier = 40,
         });
     }
 }

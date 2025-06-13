@@ -232,7 +232,7 @@ pub fn drawText(self: *Batch, desc: UITextDesc) void {
     while (iter.nextCodepoint()) |char| {
         if (char == '\n') {
             x.* = origin_x; // reset x to origin on newline
-            y.* += (desc.size / desc.font_atlas.font_size) * desc.line_height_modifier; // move y down by scale
+            y.* += (desc.size / desc.font_atlas.font_size) + desc.line_height_modifier; // move y down by scale
             continue;
         }
 

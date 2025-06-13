@@ -123,6 +123,7 @@ pub fn loadFromData(allocator: std.mem.Allocator, data: []const u8, width: u32, 
         const advance = glyphs.getAdvance(i);
         const box = glyphs.getBoxRect(i);
         const bounds = glyphs.getQuadPlaneBounds(i);
+        codepoint_to_quad.putAssumeCapacity(@intCast(glyphs.getCodepoint(i)), i);
         const quad: *GlyphQuad = &glyph_quads[i];
         quad.advance = advance;
         quad.x_offset = .{ bounds.left, bounds.right };
@@ -134,7 +135,6 @@ pub fn loadFromData(allocator: std.mem.Allocator, data: []const u8, width: u32, 
         }
         quad.top_left_texture = .{ box.x + 1, box.y + 1 };
         quad.bottom_right_texture = .{ box.x + box.w - 1, box.y + box.h - 1 };
-        codepoint_to_quad.putAssumeCapacity(@intCast(glyphs.getCodepoint(i)), i);
     }
 
     var found_metrics = ft_font.getMetrics(.NONE) orelse {
