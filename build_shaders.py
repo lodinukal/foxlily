@@ -27,7 +27,9 @@ nice_name_map = {
 }
 
 
-def compile_shader(source, entrypoint, profile, target, destination):
+def compile_shader(
+    source, entrypoint, profile, target, destination
+) -> subprocess.Popen | bool:
     """Compile a shader using slangc compiler.
 
     Args:
@@ -76,8 +78,8 @@ def compile_shader(source, entrypoint, profile, target, destination):
     ]
 
     try:
-        result = subprocess.run(cmd_args, check=True, capture_output=True, text=True)
-        return True
+        result = subprocess.Popen(cmd_args)
+        return result
     except subprocess.CalledProcessError as e:
         print(f"Error: Failed to compile shader {source}: {e.stderr}")
         return False
@@ -90,6 +92,7 @@ def compile_folder(destination, shaders):
     if not os.path.exists(destination):
         os.makedirs(destination)
 
+    all_process: list[subprocess.Popen] = []
     for shader in shaders:
         for target_and_profile in [
             ["spirv", "glsl_450"],
@@ -99,19 +102,45 @@ def compile_folder(destination, shaders):
             target, profile = target_and_profile
             kind = shader["kind"]
             if kind == "graphics":
-                if not compile_shader(
+                vs = compile_shader(
                     shader["path"], "vertex", profile, target, destination
-                ):
+                )
+                if vs:
+                    all_process.append(vs)
+                else:
                     return False
-                if not compile_shader(
+                fs = compile_shader(
                     shader["path"], "fragment", profile, target, destination
-                ):
+                )
+                if fs:
+                    all_process.append(fs)
+                else:
                     return False
             elif kind == "compute":
-                if not compile_shader(
+                cs = compile_shader(
                     shader["path"], "compute", profile, target, destination
-                ):
+                )
+                if cs:
+                    all_process.append(cs)
+                else:
                     return False
+
+    total_shaders = len(all_process)
+    done = 0
+    while True:
+        if not all_process:
+            break
+        for process in all_process:
+            if process.poll() is not None:
+                all_process.remove(process)
+                if process.returncode != 0:
+                    print(
+                        f"Error: Shader compilation failed with return code {process.returncode}."
+                    )
+                    return False
+                done += 1
+                print(f"Compiling shaders... {done}/{total_shaders} done.")
+
     return True
 
 
