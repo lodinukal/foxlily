@@ -260,7 +260,7 @@ const D3DDescriptorHeap = struct {
 
     pub fn deinit(self: *D3DDescriptorHeap, _: std.mem.Allocator) void {
         self.offset_allocator.deinit();
-        _ = self.d3d_heap.Release();
+        fullyRelease(self.d3d_heap);
     }
 
     pub fn alloc(self: *D3DDescriptorHeap, tag_range_type: d3d12.DESCRIPTOR_RANGE_TYPE, count: u32) !D3DDescriptor {
@@ -514,10 +514,16 @@ pub fn initTextureResource(
                     rtv_desc.u.Texture1D.MipSlice = desc.mip_start;
                 },
                 .d2 => {
-                    rtv_desc.u.Texture2DArray.MipSlice = desc.mip_start;
-                    rtv_desc.u.Texture2DArray.FirstArraySlice = desc.layer_start;
-                    rtv_desc.u.Texture2DArray.ArraySize = remaining_layers;
-                    rtv_desc.u.Texture2DArray.PlaneSlice = 0;
+                    if (texture_ptr.desc.sample_num > 1) {
+                        rtv_desc.ViewDimension = .TEXTURE2DMSARRAY;
+                        rtv_desc.u.Texture2DMSArray.FirstArraySlice = desc.layer_start;
+                        rtv_desc.u.Texture2DMSArray.ArraySize = remaining_layers;
+                    } else {
+                        rtv_desc.u.Texture2DArray.MipSlice = desc.mip_start;
+                        rtv_desc.u.Texture2DArray.FirstArraySlice = desc.layer_start;
+                        rtv_desc.u.Texture2DArray.ArraySize = remaining_layers;
+                        rtv_desc.u.Texture2DArray.PlaneSlice = 0;
+                    }
                 },
                 .d3 => {
                     rtv_desc.u.Texture3D.MipSlice = desc.mip_start;
@@ -550,7 +556,17 @@ pub fn initTextureResource(
                     dsv_desc.u.Texture1D.MipSlice = desc.mip_start;
                 },
                 .d2 => {
-                    dsv_desc.u.Texture2D.MipSlice = desc.mip_start;
+                    if (texture_ptr.desc.sample_num > 1) {
+                        dsv_desc.ViewDimension = .TEXTURE2DMSARRAY;
+                        dsv_desc.u.Texture2DMSArray.FirstArraySlice = desc.layer_start;
+                        dsv_desc.u.Texture2DMSArray.ArraySize = remaining_layers;
+                    } else {
+                        dsv_desc.ViewDimension = .TEXTURE2DARRAY;
+                        dsv_desc.u.Texture2DArray.MipSlice = desc.mip_start;
+                        dsv_desc.u.Texture2DArray.FirstArraySlice = desc.layer_start;
+                        dsv_desc.u.Texture2DArray.ArraySize = remaining_layers;
+                        // dsv_desc.u.Texture2DArray.PlaneSlice = 0;
+                    }
                 },
                 else => unreachable,
             }
@@ -829,7 +845,7 @@ pub fn initCommandQueue(allocator: std.mem.Allocator, desc: gpu.CommandQueueDesc
 
 pub fn deinitCommandQueue(queue: *gpu.CommandQueue) void {
     const queue_ptr: *D3DCommandQueue = @ptrCast(@alignCast(queue));
-    _ = queue_ptr.d3d_queue.Release();
+    fullyRelease(queue_ptr.d3d_queue);
     queue_ptr.allocator.destroy(queue_ptr);
 }
 
@@ -931,8 +947,8 @@ pub fn initCommandBuffer(allocator: std.mem.Allocator, queue: *gpu.CommandQueue)
 pub fn deinitCommandBuffer(cmd: *gpu.CommandBuffer) void {
     const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
 
-    _ = cmd_ptr.command_list.Release();
-    _ = cmd_ptr.command_allocator.Release();
+    fullyRelease(cmd_ptr.command_list);
+    fullyRelease(cmd_ptr.command_allocator);
 
     cmd_ptr.allocator.destroy(cmd_ptr);
 }
@@ -1626,6 +1642,56 @@ pub fn copyTextureToTexture(
     );
 }
 
+pub fn resolveTexture(
+    cmd: *gpu.CommandBuffer,
+    dst: *gpu.Texture,
+    dst_region_opt: ?gpu.TextureRegion,
+    src: *gpu.Texture,
+    src_region_opt: ?gpu.TextureRegion,
+) void {
+    const cmd_ptr: *D3DCommandBuffer = @ptrCast(@alignCast(cmd));
+    const dst_ptr: *D3DTexture = @ptrCast(@alignCast(dst));
+    const src_ptr: *D3DTexture = @ptrCast(@alignCast(src));
+
+    ensureTextureState(cmd, dst, .resolve_dest);
+    ensureTextureState(cmd, src, .resolve_source);
+
+    const dst_region: gpu.TextureRegion = dst_region_opt orelse .{};
+    const src_region: gpu.TextureRegion = src_region_opt orelse .{};
+
+    const dst_subresource = getTextureSubResourceIndex(
+        dst_ptr.desc,
+        dst_region.layer,
+        dst_region.mip,
+        dst_region.planes,
+    );
+    const src_subresource = getTextureSubResourceIndex(
+        src_ptr.desc,
+        src_region.layer,
+        src_region.mip,
+        src_region.planes,
+    );
+
+    var src_rect: d3d12.RECT = .{
+        .left = @intCast(src_region.x),
+        .top = @intCast(src_region.y),
+        .right = @intCast(gpu.getDimensionMipAdjusted(src_ptr.desc, 0, src_region.mip)),
+        .bottom = @intCast(gpu.getDimensionMipAdjusted(src_ptr.desc, 1, src_region.mip)),
+    };
+
+    cmd_ptr.command_list.ResolveSubresourceRegion(
+        dst_ptr.d3d_texture,
+        dst_subresource,
+        dst_region.x,
+        dst_region.y,
+        src_ptr.d3d_texture,
+        src_subresource,
+        &src_rect,
+        conv.formatTo(dst_ptr.desc.format),
+        .AVERAGE,
+    );
+}
+
 pub fn copyBufferToTexture(
     cmd: *gpu.CommandBuffer,
     dst: *gpu.Texture,
@@ -1882,7 +1948,7 @@ pub fn initFence(allocator: std.mem.Allocator) !*gpu.Fence {
 pub fn deinitFence(fence: *gpu.Fence) void {
     const fence_ptr: *D3DFence = @ptrCast(@alignCast(fence));
 
-    _ = fence_ptr.d3d_fence.Release();
+    fullyRelease(fence_ptr.d3d_fence);
     _ = windows.CloseHandle(fence_ptr.event);
 
     fence_ptr.allocator.destroy(fence_ptr);
@@ -1981,7 +2047,7 @@ pub fn initBuffer(allocator: std.mem.Allocator, desc: gpu.BufferDesc) gpu.Error!
 pub fn deinitBuffer(buffer: *gpu.Buffer) void {
     const buffer_ptr: *D3DBuffer = @ptrCast(@alignCast(buffer));
 
-    _ = buffer_ptr.resource.Release();
+    fullyRelease(buffer_ptr.resource);
     buffer_ptr.allocation.Release();
 
     buffer_ptr.allocator.destroy(buffer_ptr);
@@ -2126,9 +2192,9 @@ pub fn initTexture(allocator: std.mem.Allocator, raw_desc: gpu.TextureDesc) gpu.
 pub fn deinitTexture(texture: *gpu.Texture) void {
     const texture_ptr: *D3DTexture = @ptrCast(@alignCast(texture));
 
-    _ = texture_ptr.d3d_texture.Release();
     if (texture_ptr.allocation) |a|
         a.Release();
+    fullyRelease(texture_ptr.d3d_texture);
 
     if (texture_ptr.allocator) |allocator| allocator.destroy(texture_ptr);
 }
@@ -2475,10 +2541,10 @@ pub fn initPipelineLayout(allocator: std.mem.Allocator, desc: gpu.PipelineLayout
 pub fn deinitPipelineLayout(pipeline_layout: *gpu.PipelineLayout) void {
     const pipeline_layout_ptr: *D3DPipelineLayout = @ptrCast(@alignCast(pipeline_layout));
 
-    _ = pipeline_layout_ptr.d3d_indirect_signature.Release();
-    _ = pipeline_layout_ptr.d3d_indirect_indexed_signature.Release();
+    fullyRelease(pipeline_layout_ptr.d3d_indirect_signature);
+    fullyRelease(pipeline_layout_ptr.d3d_indirect_indexed_signature);
 
-    _ = pipeline_layout_ptr.d3d_root_signature.Release();
+    fullyRelease(pipeline_layout_ptr.d3d_root_signature);
     pipeline_layout_ptr.allocator.destroy(pipeline_layout_ptr);
 }
 
@@ -2601,7 +2667,7 @@ pub fn initGraphicsPipeline(
 
     if (desc.multisample.enabled) {
         pso_desc.RasterizerState.MultisampleEnable = @intFromBool(desc.multisample.sample_num > 1);
-        pso_desc.RasterizerState.ForcedSampleCount = if (desc.multisample.sample_num > 1) desc.multisample.sample_num else 0;
+        // pso_desc.RasterizerState.ForcedSampleCount = if (desc.multisample.sample_num > 1) desc.multisample.sample_num else 0;
     }
 
     pso_desc.DepthStencilState.DepthEnable = @intFromBool(desc.output_merger.depth.compare_op != .none);
@@ -2703,7 +2769,7 @@ pub fn initComputePipeline(
 pub fn deinitPipeline(pipeline: *gpu.Pipeline) void {
     const pipeline_ptr: *D3DPipeline = @ptrCast(@alignCast(pipeline));
 
-    _ = pipeline_ptr.pipeline.Release();
+    fullyRelease(pipeline_ptr.pipeline);
 
     pipeline_ptr.allocator.destroy(pipeline_ptr);
 }
@@ -2812,7 +2878,7 @@ pub fn deinitSwapchain(swapchain: *gpu.Swapchain) void {
     const swapchain_ptr: *D3DSwapchain = @ptrCast(@alignCast(swapchain));
 
     releaseSwapchainTextures(swapchain);
-    _ = swapchain_ptr.d3d_swapchain.Release();
+    fullyRelease(swapchain_ptr.d3d_swapchain);
     swapchain_ptr.allocator.destroy(swapchain_ptr);
 }
 
@@ -2882,6 +2948,7 @@ fn acquireSwapchainTextures(swapchain: *gpu.Swapchain) !void {
         if (hr_getbuffer != windows.S_OK) {
             return error.D3D12InternalError;
         }
+        _ = resource.?.AddRef();
 
         tex.* = .{
             .d3d_texture = resource.?,
@@ -3022,6 +3089,12 @@ const conv = struct {
             .copy_dest => return .{
                 .COPY_DEST = true,
             },
+            .resolve_source => return .{
+                .RESOLVE_SOURCE = true,
+            },
+            .resolve_dest => return .{
+                .RESOLVE_DEST = true,
+            },
         }
     }
 
@@ -3151,6 +3224,23 @@ fn getTextureSubResourceIndex(
         }
     }
     return mip_offset + (layer_offset + plane_index * desc.layer_num) * desc.mip_num;
+}
+
+fn fullyRelease(maybe_opt_c: anytype) void {
+    if (@typeInfo(@TypeOf(maybe_opt_c)) == .optional) {
+        const c = maybe_opt_c.?;
+
+        var ref_count: u32 = c.AddRef();
+        while (ref_count > 0) {
+            ref_count = c.Release();
+        }
+    } else {
+        const c = maybe_opt_c;
+        var ref_count: u32 = c.AddRef();
+        while (ref_count > 0) {
+            ref_count = c.Release();
+        }
+    }
 }
 
 const log = std.log.scoped(.@"gpu d3d12");

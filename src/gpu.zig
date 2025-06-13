@@ -272,6 +272,15 @@ pub const CommandBuffer = opaque {
     ) void {
         return impl.call(.copyTextureToTexture, void, .{ cmd, dst, dst_region_opt, src, src_region_opt });
     }
+    pub inline fn resolveTexture(
+        cmd: *CommandBuffer,
+        dst: *Texture,
+        dst_region_opt: ?TextureRegion,
+        src: *Texture,
+        src_region_opt: ?TextureRegion,
+    ) void {
+        return impl.call(.resolveTexture, void, .{ cmd, dst, dst_region_opt, src, src_region_opt });
+    }
     pub inline fn copyBufferToTexture(
         cmd: *CommandBuffer,
         dst: *Texture,
@@ -804,6 +813,7 @@ pub const TextureDesc = struct {
     depth: u32,
     mip_num: u32,
     layer_num: u32,
+    /// 4 and 8 are supported
     sample_num: u32,
 
     pub inline fn fix(desc: TextureDesc) TextureDesc {
@@ -827,6 +837,8 @@ pub const TextureState = enum(u32) {
     unordered_access,
     copy_source,
     copy_dest,
+    resolve_source,
+    resolve_dest,
 };
 
 /// describes a buffer resource, like what size it has, what heap it is on, and
@@ -1151,6 +1163,7 @@ pub const Rasterization = struct {
 pub const Multisample = struct {
     enabled: bool = false,
     sample_mask: u32 = 0,
+    /// 4 and 8 are supported
     sample_num: u32 = 0,
     alpha_to_coverage: bool = false,
 };
@@ -1654,6 +1667,7 @@ pub const TextureRegion = struct {
     depth: u32 = WHOLE_SIZE_U32,
     mip: u32 = 0,
     layer: u32 = 0,
+    planes: PlaneFlags = .{},
 };
 
 /// extents of a texture
