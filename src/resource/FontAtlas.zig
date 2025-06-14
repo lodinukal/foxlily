@@ -5,7 +5,6 @@ const FontAtlas = @This();
 const ila = @import("../root.zig");
 
 const msdfgen = @import("msdfgen");
-const msdfatlasgen = @import("msdfatlasgen");
 
 allocator: std.mem.Allocator,
 glyph_quads: []GlyphQuad = &.{},
@@ -26,13 +25,13 @@ pub fn loadFromData(allocator: std.mem.Allocator, data: []const u8, width: u32, 
 
     const ft = try getFreetypeLib();
 
-    const ft_font = ft.loadFontData(data) orelse {
+    const ft_font = ft.loadFontData(data) catch {
         std.log.err("Failed to load font data", .{});
         return error.LoadFontDataFailed;
     };
-    defer ft_font.deinit();
+    // defer ft_font.deinit();
 
-    const charset = msdfatlasgen.Charset.init() orelse {
+    const charset = msdfgen.Charset.init() catch {
         std.log.err("Failed to create charset", .{});
         return error.InitCharsetFailed;
     };
@@ -56,7 +55,7 @@ pub fn loadFromData(allocator: std.mem.Allocator, data: []const u8, width: u32, 
     );
     errdefer allocator.free(glyph_quads);
 
-    const font_geometry = msdfatlasgen.FontGeometry.init() orelse {
+    const font_geometry = msdfgen.FontGeometry.init() catch {
         std.log.err("Failed to create font geometry", .{});
         return error.InitFontGeometryFailed;
     };
@@ -70,7 +69,7 @@ pub fn loadFromData(allocator: std.mem.Allocator, data: []const u8, width: u32, 
         glyphs.setEdgeColoring(i, .by_distance, 3.0, 0);
     }
 
-    const packer = msdfatlasgen.Packer.init() orelse {
+    const packer = msdfgen.Packer.init() catch {
         std.log.err("Failed to create packer", .{});
         return error.InitPackerFailed;
     };
@@ -87,8 +86,9 @@ pub fn loadFromData(allocator: std.mem.Allocator, data: []const u8, width: u32, 
         std.log.err("Failed to pack glyphs {}", .{pack_res});
         return error.PackFontRangeFailed;
     }
+    const scale = packer.getScale();
 
-    const generator = msdfatlasgen.ImmediateAtlasGenerator.init(width, height) orelse {
+    const generator = msdfgen.ImmediateAtlasGenerator.init(width, height) catch {
         std.log.err("Failed to create atlas generator", .{});
         return error.InitAtlasGeneratorFailed;
     };
@@ -96,7 +96,6 @@ pub fn loadFromData(allocator: std.mem.Allocator, data: []const u8, width: u32, 
 
     generator.setThreadCount(16);
     generator.generate(glyphs);
-    const scale = packer.getScale();
 
     const bitmap = generator.getBitmap();
     const bitmap_slice = bitmap.slice();
@@ -163,7 +162,7 @@ pub fn loadFromData(allocator: std.mem.Allocator, data: []const u8, width: u32, 
 var ft_lib: ?*msdfgen.FreetypeHandle = null;
 fn getFreetypeLib() !*msdfgen.FreetypeHandle {
     if (ft_lib) |lib| return lib;
-    const new_lib = msdfgen.FreetypeHandle.init() orelse {
+    const new_lib = msdfgen.FreetypeHandle.init() catch {
         std.log.err("Failed to initialize FreeType", .{});
         return error.InitFreetypeFailed;
     };

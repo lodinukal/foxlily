@@ -58,8 +58,8 @@
             .path = "external/stb",
         },
         .msdfgen = .{
-            .url = "git+https://github.com/lodinukal/msdfgen.git#6867c7df8ecf90ce7dee0fa0d7f81e8e49700b97",
-            .hash = "msdfgen-1.12.1-Eg9verdCCQBr90qNg7rzUahz3mkPsggw8WsYBFwtLjJs",
+            .url = "git+https://github.com/lodinukal/msdfgen#1197e4e965b18585f7e6fd6823f688a4f0a27a84",
+            .hash = "msdfgen-1.12.1-Eg9venplCQD0dT3ZcVPBjFM50gCsONVJo302VNzdWNua",
         },
     },
     .paths = .{

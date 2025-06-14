@@ -48,7 +48,6 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "stb", .module = zstb_dep.module("zstb") },
             .{ .name = "msdfgen", .module = msdfgen_dep.module("msdfgen") },
-            .{ .name = "msdfatlasgen", .module = msdfgen_dep.module("msdfatlasgen") },
         },
     });
     lib_mod.addOptions("config", options);
